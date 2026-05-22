@@ -525,13 +525,18 @@ def _close_issue_impl(
             f"Allowed: {', '.join(allowed)}"
         )
 
-    # Wrap the resolved state in braces so YouTrack treats multi-word names
-    # ("In Progress", "Won't fix") as a single token, not two arguments.
+    # Wrap the resolved state in braces ONLY if it contains whitespace or
+    # non-alphanumerics. YouTrack's command parser requires braces for
+    # multi-word values like {In Progress} or {Won't fix}, but REJECTS them
+    # for plain single-word values: "State {Done}" yields HTTP 400.
+    needs_braces = bool(re.search(r"[^A-Za-z0-9]", target_state))
+    state_token = f"{{{target_state}}}" if needs_braces else target_state
+
     # The commands endpoint is /api/commands (singular, top-level), not
     # /api/issues/{id}/commands (which returns 404 "No subresource for path
     # commands"). The target issue is specified in the body, not the URL.
     body: dict[str, Any] = {
-        "query": f"State {{{target_state}}}",
+        "query": f"State {state_token}",
         "issues": [{"idReadable": issue_id}],
     }
     if comment:

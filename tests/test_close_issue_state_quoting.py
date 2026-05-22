@@ -52,16 +52,25 @@ def test_close_issue_wraps_multi_word_state_in_braces(patched):
 def test_close_issue_wraps_apostrophe_state_in_braces(patched):
     server._close_issue_impl("PROJ-1", state="wontfix")
     body = _stub_request.last_command_body
-    # synonym resolution: "wontfix" → "Won't fix" in allowed list
+    # synonym resolution: "wontfix" → "Won't fix" in allowed list, with braces
+    # because of the apostrophe (non-alphanumeric).
     assert body["query"] == "State {Won't fix}"
 
 
 def test_close_issue_picks_done_when_state_none(patched):
     server._close_issue_impl("PROJ-1", state=None)
     body = _stub_request.last_command_body
-    assert body["query"] == "State {Done}"
+    # Single-word state must NOT be braced: YouTrack rejects "State {Done}"
+    # with HTTP 400.
+    assert body["query"] == "State Done"
     # Issue is specified in the body, not the URL.
     assert body["issues"] == [{"idReadable": "PROJ-1"}]
+
+
+def test_close_issue_single_word_state_unbraced(patched):
+    server._close_issue_impl("PROJ-1", state="done")  # lowercase synonym
+    body = _stub_request.last_command_body
+    assert body["query"] == "State Done"
 
 
 def test_close_issue_raises_when_no_state_field(monkeypatch):
