@@ -11,12 +11,34 @@ Lets Claude Code create, comment on, and close YouTrack issues from any conversa
 
 ## 1. Get your YouTrack token
 
-In YouTrack, click your avatar, then **Profile** → **Account Security** → **New token...**
+Follow JetBrains' official guide: [Manage Permanent Token](https://www.jetbrains.com/help/youtrack/cloud/Manage-Permanent-Token.html) (self-hosted users: same flow, replace `/cloud/` with `/server/` in the URL).
 
-- **Name:** `claude-mcp`
-- **Scope:** YouTrack (the default scope is enough)
+Short version:
 
-Copy the token. It looks like `perm-XXXX.YYYY.ZZZZ` and is only shown once.
+1. In YouTrack, click your avatar, then **Profile**.
+2. Open the **Account Security** tab.
+3. Click **New token...** in the *Tokens* section.
+4. Set:
+   - **Name:** `claude-mcp` (anything readable; helps you revoke later).
+   - **Scope:** **YouTrack** (grants access to issues, tags, commands, comments, custom fields. This is the minimum scope this MCP needs).
+5. Click **Create token**.
+6. Copy the token immediately. It looks like `perm-XXXX.YYYY.ZZZZ` and **cannot be shown again**. Move on to step 2 to store it.
+
+### What permissions does the MCP need?
+
+The token can only do what your YouTrack user can do. The MCP calls these endpoints:
+
+| Operation | YouTrack permission needed (per project) |
+|---|---|
+| `list_projects`, `get_project_fields` | Read Project |
+| `search_issues` | Read Issue |
+| `create_issue` | Create Issue |
+| `add_comment` | Update Issue (Add Comment) |
+| `close_issue` (state change via commands) | Update Issue (Apply Command) |
+
+If your user already has the standard "Developer" or "Project Member" role on the projects you want to track from, you have everything you need. If you only want read access (search and inspect), you can use a token from a user who only has *Read Project* + *Read Issue* and the create/comment/close tools will simply fail with `HTTP 403` when called.
+
+Admins can compare the built-in roles (Developer, Project Admin, Reporter, etc.) at [Permission Comparison for Default Roles](https://www.jetbrains.com/help/youtrack/cloud/permissions-comparison-for-default-roles.html). The full permission catalog is at [Permissions Reference](https://www.jetbrains.com/help/youtrack/cloud/youtrack-permissions-reference.html).
 
 ## 2. Choose how to store the token
 

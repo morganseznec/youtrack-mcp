@@ -26,7 +26,7 @@ unset TOKEN
 
 `read -rs` takes the token without echoing it and keeps the expanded value out of your shell history.
 
-Get your token from YouTrack → Profile → Account Security → New token. Verify with `claude mcp list | grep youtrack`; it should show `✓ Connected`.
+Create your token by following JetBrains' guide: [Manage Permanent Token](https://www.jetbrains.com/help/youtrack/cloud/Manage-Permanent-Token.html). Use the **YouTrack** scope. The token can only do what your user can do per project, so make sure you have Read/Create/Update Issue on the projects you want to track. Verify the install with `claude mcp list | grep youtrack`; it should show `✓ Connected`.
 
 **Want better security?** The server also reads the token from a file (`YOUTRACK_TOKEN_FILE`) or a command (`YOUTRACK_TOKEN_CMD`, ideal for macOS Keychain / `secret-tool` / 1Password CLI), so it never has to sit in `~/.claude.json`. See [SETUP.md](SETUP.md) section 2 for the three options.
 
