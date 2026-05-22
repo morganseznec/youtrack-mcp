@@ -1,6 +1,6 @@
-# YouTrack MCP — setup
+# YouTrack MCP setup
 
-Lets Claude Code create / comment on / close YouTrack issues from any conversation.
+Lets Claude Code create, comment on, and close YouTrack issues from any conversation.
 
 ## Prerequisites
 
@@ -11,12 +11,12 @@ Lets Claude Code create / comment on / close YouTrack issues from any conversati
 
 ## 1. Get your YouTrack token
 
-In YouTrack, click your avatar → **Profile** → **Account Security** → **New token...**
+In YouTrack, click your avatar, then **Profile** → **Account Security** → **New token...**
 
 - **Name:** `claude-mcp`
 - **Scope:** YouTrack (the default scope is enough)
 
-Copy the token — it looks like `perm-XXXX.YYYY.ZZZZ`. It's only shown once.
+Copy the token. It looks like `perm-XXXX.YYYY.ZZZZ` and is only shown once.
 
 ## 2. Register the server with Claude Code
 
@@ -27,14 +27,14 @@ claude mcp add youtrack -s user \
   -e YOUTRACK_URL=https://<instance>.youtrack.cloud \
   -e YOUTRACK_TOKEN='perm-...' \
   -e YOUTRACK_DEFAULT_PROJECT_ID=0-1 \
-  -- uvx --from git+https://github.com/<owner>/youtrack-mcp youtrack-mcp
+  -- uvx --from git+https://github.com/morganseznec/youtrack-mcp youtrack-mcp
 ```
 
-- `YOUTRACK_URL` — your YouTrack base URL, no trailing slash, no `/api`.
-- `YOUTRACK_TOKEN` — the permanent token from step 1. Single quotes protect against `=` and special chars.
-- `YOUTRACK_DEFAULT_PROJECT_ID` — internal ID of your default project (format `<n>-<m>`). Optional: if omitted, every call must pass `project_id`. Find yours by calling `list_projects` from the MCP once.
-- `-s user` registers it in your user-level `~/.claude.json`, so it's available across every project.
-- `uvx --from git+https://...` runs the server straight from the repo — no local clone needed, updates pulled automatically.
+- `YOUTRACK_URL`: your YouTrack base URL, no trailing slash, no `/api`.
+- `YOUTRACK_TOKEN`: the permanent token from step 1. Single quotes protect against `=` and special chars.
+- `YOUTRACK_DEFAULT_PROJECT_ID`: internal ID of your default project (format `<n>-<m>`). Optional. If omitted, every call must pass `project_id`. Find yours by calling `list_projects` from the MCP once.
+- `-s user`: registers it in your user-level `~/.claude.json`, so it's available across every project.
+- `uvx --from git+https://...`: runs the server straight from the repo. No local clone needed, updates pulled automatically.
 
 Verify:
 
@@ -49,7 +49,7 @@ claude mcp list | grep youtrack
 
 MCP tools are loaded at session start, so an already-open session won't see them. Quit and relaunch.
 
-In a new session, ask Claude something like *"list my YouTrack projects"* — it should call the MCP and reply with your project list.
+In a new session, ask Claude something like *"list my YouTrack projects"*. It should call the MCP and reply with your project list.
 
 ## 4. (Optional) Enable per-project automation
 
@@ -67,14 +67,14 @@ custom_fields:
   Type: "Bug"
 ```
 
-The `youtrack-workflow` skill (also user-level, in `~/.claude/skills/youtrack-workflow/`) reads this file and orchestrates the search → propose → comment → close flow.
+The `youtrack-workflow` skill (also user-level, in `~/.claude/skills/youtrack-workflow/`) reads this file and orchestrates the search, propose, comment, close flow.
 
 ## Updating the server
 
-With the `uvx --from git+...` install, just relaunch Claude Code — uvx fetches the latest commit on the next session start. To pin a specific version, append `@<tag-or-sha>`:
+With the `uvx --from git+...` install, just relaunch Claude Code. uvx fetches the latest commit on the next session start. To pin a specific version, append `@<tag-or-sha>`:
 
 ```
-... -- uvx --from git+https://github.com/<owner>/youtrack-mcp@v1.0.0 youtrack-mcp
+... -- uvx --from git+https://github.com/morganseznec/youtrack-mcp@v1.0.0 youtrack-mcp
 ```
 
 ## Removing it
@@ -85,7 +85,7 @@ claude mcp remove youtrack -s user
 
 ## Troubleshooting
 
-- **`✗` in `claude mcp list`** — usually the token is wrong, the URL has a trailing slash or `/api`, or `uvx` isn't on `PATH` in Claude's shell. Try running the same `uvx` command directly in a terminal to see the actual error.
-- **`HTTP 401`** — token is invalid or revoked. Generate a new one.
-- **`HTTP 404` on issue ops** — wrong issue ID format. Use either the readable form (`PROJ-42`) or the internal `2-128`.
-- **Tool calls work but `create_issue` errors on a custom field** — the field name or value doesn't match your project schema. The server validates upfront and returns the allowed values; relay that to fix the input. You can also call `get_project_fields(project_id="...")` to inspect the full schema.
+- **`✗` in `claude mcp list`**: usually the token is wrong, the URL has a trailing slash or `/api`, or `uvx` isn't on `PATH` in Claude's shell. Try running the same `uvx` command directly in a terminal to see the actual error.
+- **`HTTP 401`**: token is invalid or revoked. Generate a new one.
+- **`HTTP 404` on issue ops**: wrong issue ID format. Use either the readable form (`PROJ-42`) or the internal `2-128`.
+- **Tool calls work but `create_issue` errors on a custom field**: the field name or value doesn't match your project schema. The server validates upfront and returns the allowed values; relay that to fix the input. You can also call `get_project_fields(project_id="...")` to inspect the full schema.

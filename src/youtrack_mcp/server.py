@@ -76,13 +76,13 @@ def _issue_url(id_readable: str) -> str:
 # Project schema cache + fuzzy matching helpers
 # ──────────────────────────────────────────────────────────────────────────────
 
-_SCHEMA_TTL_SECONDS = 600  # 10 min — long-lived MCP server, schemas change rarely
+_SCHEMA_TTL_SECONDS = 600  # 10 min. Long-lived MCP server, schemas change rarely.
 _schema_cache: dict[str, tuple[float, dict]] = {}
 _schema_cache_lock = Lock()
 
 
 def _fetch_project_schema(project_id: str) -> dict:
-    """Raw fetch — bypasses cache. Returns {project_id, fields: [...]}."""
+    """Raw fetch. Bypasses cache. Returns {project_id, fields: [...]}."""
     raw = _request(
         "GET",
         f"/admin/projects/{project_id}/customFields",
