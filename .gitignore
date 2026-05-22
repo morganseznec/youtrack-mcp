@@ -1,0 +1,31 @@
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+
+# distribution / packaging
+build/
+dist/
+*.egg-info/
+*.egg
+
+# environments
+.venv/
+venv/
+env/
+.python-version
+
+# uv
+uv.lock
+
+# editors
+.vscode/
+.idea/
+*.swp
+*~
+.DS_Store
+
+# local config (token in env, don't commit accidentally if a .env exists)
+.env
+.env.local

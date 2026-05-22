@@ -1,0 +1,81 @@
+# .youtrack.yml — drop this at the root of a project to wire it up with the
+# YouTrack MCP. Claude detects it and uses the values below to find/create/close
+# issues for the work being done in this repo.
+#
+# Copy this file to `.youtrack.yml` in your project root and adjust.
+
+# REQUIRED — YouTrack internal project ID (format: "<n>-<m>", e.g. "0-1").
+# Find yours by running the MCP tool `list_projects` once.
+project_id: "0-1"
+
+# OPTIONAL — short code shown in YouTrack URLs (purely cosmetic, used in logs).
+project_short: "PROJ"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Behavior toggles
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Search YouTrack for an existing matching issue before creating a new one.
+auto_search: true
+
+# Proactively volunteer ticket actions when task-shaped language is detected
+# ("there's a bug", "let's add", "il faut corriger"...).
+auto_propose: true
+
+# Notify-only mode: when true, the skill creates/updates/closes without asking
+# for confirmation. It still shows a one-line notification with the YouTrack
+# link for every action. Default: false (skill always asks first).
+auto_confirm: false
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Writing conventions — how Claude phrases tickets in this project
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Language used in the ticket body and title. "en" or "fr".
+language: "en"
+
+# Optional template for the summary line. Available placeholders:
+#   {summary}     — the title Claude generated from the user's request
+#   plus any key defined in `variables` below
+# If omitted, the raw summary is used.
+summary_template: "[{env}] {summary}"
+
+# Optional template for the description body. Same placeholders as above plus:
+#   {description} — the body Claude drafted
+# Use `|` for multi-line YAML strings.
+description_template: |
+  ## Context
+  {description}
+
+  ---
+  *Environment: {env}*
+
+# Variables interpolated into the templates above.
+variables:
+  env: "prod"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# YouTrack custom fields — set automatically on every created issue
+# ─────────────────────────────────────────────────────────────────────────────
+# Discover what's configurable on your project by running the MCP tool
+# `get_project_fields(project_id="0-1")` — it returns field names + allowed
+# values. Common YouTrack fields: Priority, Type, Severity, Assignee, Subsystem.
+#
+# Values are matched case-insensitively against the project's enum values, so
+# "normal" matches "Normal", "won't fix" matches "Won't fix", etc.
+custom_fields: {}
+#   Priority: "Normal"
+#   Type: "Bug"
+#   Assignee: "your.login"
+
+# OPTIONAL — tags applied to every issue created from this project
+default_tags: []
+#   - "claude-created"
+#   - "backend"
+
+# OPTIONAL — subdirectories where the workflow should stay silent
+# (relative to project root). Useful for vendored deps, generated code, etc.
+ignore_paths: []
+#   - vendor/
+#   - node_modules/
+#   - .gradle/
