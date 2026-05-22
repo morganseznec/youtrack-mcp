@@ -4,13 +4,17 @@ Entry points (declared in pyproject.toml):
   youtrack-projects   List all YouTrack projects with their IDs.
 
 Env resolution order:
-  1. YOUTRACK_URL / YOUTRACK_TOKEN in the process environment.
+  1. YOUTRACK_URL and a token source in the process environment. A token source
+     is one of YOUTRACK_TOKEN (raw), YOUTRACK_TOKEN_FILE (path), or
+     YOUTRACK_TOKEN_CMD (command whose stdout is the token).
   2. mcpServers.youtrack.env in ~/.claude.json (so installs registered via
      `claude mcp add` work out of the box without re-exporting credentials).
 """
 
 import json
 import os
+import shlex
+import subprocess
 import sys
 import urllib.error
 import urllib.parse
@@ -39,14 +43,55 @@ def _load_env_from_claude_config() -> None:
         os.environ.setdefault(key, value)
 
 
+def _resolve_token() -> str:
+    """Read the token from YOUTRACK_TOKEN, then YOUTRACK_TOKEN_FILE, then YOUTRACK_TOKEN_CMD."""
+    direct = os.environ.get("YOUTRACK_TOKEN", "").strip()
+    if direct:
+        return direct
+
+    file_path = os.environ.get("YOUTRACK_TOKEN_FILE", "").strip()
+    if file_path:
+        try:
+            return Path(file_path).expanduser().read_text(encoding="utf-8").strip()
+        except OSError as e:
+            sys.stderr.write(f"YOUTRACK_TOKEN_FILE '{file_path}' could not be read: {e}\n")
+            sys.exit(2)
+
+    cmd_str = os.environ.get("YOUTRACK_TOKEN_CMD", "").strip()
+    if cmd_str:
+        try:
+            result = subprocess.run(
+                shlex.split(cmd_str),
+                capture_output=True,
+                text=True,
+                check=True,
+                timeout=10,
+            )
+            return result.stdout.strip()
+        except subprocess.CalledProcessError as e:
+            sys.stderr.write(
+                f"YOUTRACK_TOKEN_CMD failed (exit {e.returncode}): {e.stderr.strip()}\n"
+            )
+            sys.exit(2)
+        except subprocess.TimeoutExpired:
+            sys.stderr.write("YOUTRACK_TOKEN_CMD timed out after 10s\n")
+            sys.exit(2)
+        except FileNotFoundError as e:
+            sys.stderr.write(f"YOUTRACK_TOKEN_CMD: {e}\n")
+            sys.exit(2)
+
+    return ""
+
+
 def _require_env() -> tuple[str, str]:
     _load_env_from_claude_config()
     url = os.environ.get("YOUTRACK_URL", "").rstrip("/")
-    token = os.environ.get("YOUTRACK_TOKEN", "")
+    token = _resolve_token()
     if not url or not token:
         sys.stderr.write(
-            "Missing YOUTRACK_URL or YOUTRACK_TOKEN.\n"
-            "Either export them in your shell, or register the MCP first with:\n"
+            "Missing YOUTRACK_URL or a token source.\n"
+            "Provide a token via YOUTRACK_TOKEN, YOUTRACK_TOKEN_FILE, or YOUTRACK_TOKEN_CMD,\n"
+            "or register the MCP first with:\n"
             "  claude mcp add youtrack -s user -e YOUTRACK_URL=... -e YOUTRACK_TOKEN=... -- ...\n"
         )
         sys.exit(2)

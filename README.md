@@ -15,18 +15,20 @@
 ## Quick install
 
 ```bash
+read -rs TOKEN && echo
 claude mcp add youtrack -s user \
   -e YOUTRACK_URL=https://<instance>.youtrack.cloud \
-  -e YOUTRACK_TOKEN='perm-...' \
+  -e YOUTRACK_TOKEN="$TOKEN" \
   -e YOUTRACK_DEFAULT_PROJECT_ID=0-1 \
   -- uvx --from git+https://github.com/morganseznec/youtrack-mcp youtrack-mcp
+unset TOKEN
 ```
 
-Get your token from YouTrack → Profile → Account Security → New token.
+`read -rs` takes the token without echoing it and keeps the expanded value out of your shell history.
 
-Verify with `claude mcp list | grep youtrack`. It should show `✓ Connected`.
+Get your token from YouTrack → Profile → Account Security → New token. Verify with `claude mcp list | grep youtrack`; it should show `✓ Connected`.
 
-See **[SETUP.md](SETUP.md)** for the full walk-through.
+**Want better security?** The server also reads the token from a file (`YOUTRACK_TOKEN_FILE`) or a command (`YOUTRACK_TOKEN_CMD`, ideal for macOS Keychain / `secret-tool` / 1Password CLI), so it never has to sit in `~/.claude.json`. See [SETUP.md](SETUP.md) section 2 for the three options.
 
 ## Helper: list project IDs
 

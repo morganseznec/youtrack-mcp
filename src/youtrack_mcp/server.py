@@ -11,6 +11,8 @@ Env vars (read at startup):
 import json
 import os
 import re
+import shlex
+import subprocess
 import time
 import urllib.error
 import urllib.parse
@@ -25,12 +27,60 @@ from mcp.server.fastmcp import FastMCP
 CONFIG_FILENAME = ".youtrack.yml"
 CONFIG_FILENAMES = (".youtrack.yml", ".youtrack.yaml")
 
+
+def _resolve_token() -> str:
+    """Read the YouTrack token from the first available source.
+
+    Order of precedence:
+      1. YOUTRACK_TOKEN env var (raw value).
+      2. YOUTRACK_TOKEN_FILE env var (path to a file containing the token).
+      3. YOUTRACK_TOKEN_CMD env var (shell command whose stdout is the token).
+
+    Returns an empty string if no source is set.
+    """
+    direct = os.environ.get("YOUTRACK_TOKEN", "").strip()
+    if direct:
+        return direct
+
+    file_path = os.environ.get("YOUTRACK_TOKEN_FILE", "").strip()
+    if file_path:
+        try:
+            return Path(file_path).expanduser().read_text(encoding="utf-8").strip()
+        except OSError as e:
+            raise SystemExit(f"YOUTRACK_TOKEN_FILE '{file_path}' could not be read: {e}")
+
+    cmd_str = os.environ.get("YOUTRACK_TOKEN_CMD", "").strip()
+    if cmd_str:
+        try:
+            result = subprocess.run(
+                shlex.split(cmd_str),
+                capture_output=True,
+                text=True,
+                check=True,
+                timeout=10,
+            )
+            return result.stdout.strip()
+        except subprocess.CalledProcessError as e:
+            raise SystemExit(
+                f"YOUTRACK_TOKEN_CMD failed (exit {e.returncode}): {e.stderr.strip()}"
+            )
+        except subprocess.TimeoutExpired:
+            raise SystemExit("YOUTRACK_TOKEN_CMD timed out after 10s")
+        except FileNotFoundError as e:
+            raise SystemExit(f"YOUTRACK_TOKEN_CMD: {e}")
+
+    return ""
+
+
 YOUTRACK_URL = os.environ.get("YOUTRACK_URL", "").rstrip("/")
-YOUTRACK_TOKEN = os.environ.get("YOUTRACK_TOKEN", "")
+YOUTRACK_TOKEN = _resolve_token()
 YOUTRACK_DEFAULT_PROJECT_ID = os.environ.get("YOUTRACK_DEFAULT_PROJECT_ID", "")
 
 if not YOUTRACK_URL or not YOUTRACK_TOKEN:
-    raise SystemExit("YOUTRACK_URL and YOUTRACK_TOKEN must be set")
+    raise SystemExit(
+        "YOUTRACK_URL and a token source must be set. "
+        "Provide a token via YOUTRACK_TOKEN, YOUTRACK_TOKEN_FILE, or YOUTRACK_TOKEN_CMD."
+    )
 
 mcp = FastMCP("youtrack")
 
