@@ -27,6 +27,26 @@ Verify with `claude mcp list | grep youtrack`. It should show `✓ Connected`.
 
 See **[SETUP.md](SETUP.md)** for the full walk-through.
 
+## Helper: list project IDs
+
+YouTrack doesn't expose internal project IDs in its UI. Run this to see yours:
+
+```bash
+uvx --from git+https://github.com/morganseznec/youtrack-mcp youtrack-projects
+```
+
+Output (aligned columns):
+
+```
+ID    SHORT     NAME
+----  --------  ----
+0-1   PROJ      My Project
+0-2   API       Backend API
+...
+```
+
+Reads `YOUTRACK_URL` and `YOUTRACK_TOKEN` from your environment, or falls back to the values you already gave `claude mcp add youtrack` (read from `~/.claude.json`), so once the MCP is registered you don't need to re-export anything.
+
 ## Per-project automation (optional)
 
 Drop a `.youtrack.yml` at the root of a repo to opt that project into automatic ticket tracking:

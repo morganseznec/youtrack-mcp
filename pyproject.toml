@@ -32,6 +32,7 @@ dependencies = [
 
 [project.scripts]
 youtrack-mcp = "youtrack_mcp.server:main"
+youtrack-projects = "youtrack_mcp.cli:list_projects"
 
 [project.urls]
 Homepage = "https://github.com/morganseznec/youtrack-mcp"

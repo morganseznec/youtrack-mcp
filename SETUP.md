@@ -32,7 +32,7 @@ claude mcp add youtrack -s user \
 
 - `YOUTRACK_URL`: your YouTrack base URL, no trailing slash, no `/api`.
 - `YOUTRACK_TOKEN`: the permanent token from step 1. Single quotes protect against `=` and special chars.
-- `YOUTRACK_DEFAULT_PROJECT_ID`: internal ID of your default project (format `<n>-<m>`). Optional. If omitted, every call must pass `project_id`. Find yours by calling `list_projects` from the MCP once.
+- `YOUTRACK_DEFAULT_PROJECT_ID`: internal ID of your default project (format `<n>-<m>`). Optional. If omitted, every call must pass `project_id`. To discover yours without setting up the MCP first, run `uvx --from git+https://github.com/morganseznec/youtrack-mcp youtrack-projects` (after exporting `YOUTRACK_URL` and `YOUTRACK_TOKEN`).
 - `-s user`: registers it in your user-level `~/.claude.json`, so it's available across every project.
 - `uvx --from git+https://...`: runs the server straight from the repo. No local clone needed, updates pulled automatically.
 
