@@ -527,10 +527,16 @@ def _close_issue_impl(
 
     # Wrap the resolved state in braces so YouTrack treats multi-word names
     # ("In Progress", "Won't fix") as a single token, not two arguments.
-    body: dict[str, Any] = {"query": f"State {{{target_state}}}"}
+    # The commands endpoint is /api/commands (singular, top-level), not
+    # /api/issues/{id}/commands (which returns 404 "No subresource for path
+    # commands"). The target issue is specified in the body, not the URL.
+    body: dict[str, Any] = {
+        "query": f"State {{{target_state}}}",
+        "issues": [{"idReadable": issue_id}],
+    }
     if comment:
         body["comment"] = comment
-    _request("POST", f"/issues/{issue_id}/commands", body=body)
+    _request("POST", "/commands", body=body)
     return {
         "ok": True,
         "issue_id": issue_id,

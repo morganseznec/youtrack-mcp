@@ -11,10 +11,11 @@ from youtrack_mcp import server
 
 def _stub_request(method, path, body=None, params=None):
     """Mock _request to capture the call instead of hitting YouTrack."""
-    if path.endswith("/commands"):
+    if path == "/commands":
         _stub_request.last_command_body = body
+        _stub_request.last_command_path = path
         return {}
-    if path == f"/issues/PROJ-1":
+    if path == "/issues/PROJ-1":
         return {"project": {"id": "0-1"}}
     raise AssertionError(f"unexpected path: {path}")
 
@@ -44,6 +45,8 @@ def test_close_issue_wraps_multi_word_state_in_braces(patched):
     body = _stub_request.last_command_body
     assert body is not None
     assert body["query"] == "State {In Progress}"
+    assert body["issues"] == [{"idReadable": "PROJ-1"}]
+    assert _stub_request.last_command_path == "/commands"
 
 
 def test_close_issue_wraps_apostrophe_state_in_braces(patched):
@@ -57,6 +60,8 @@ def test_close_issue_picks_done_when_state_none(patched):
     server._close_issue_impl("PROJ-1", state=None)
     body = _stub_request.last_command_body
     assert body["query"] == "State {Done}"
+    # Issue is specified in the body, not the URL.
+    assert body["issues"] == [{"idReadable": "PROJ-1"}]
 
 
 def test_close_issue_raises_when_no_state_field(monkeypatch):
