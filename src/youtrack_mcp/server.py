@@ -607,8 +607,13 @@ def create_and_close_issue(
 def search_issues(query: str, limit: int = 10) -> list[dict]:
     """Search issues using YouTrack query syntax.
 
+    Note: the `project:` operator expects the project's SHORT NAME (e.g. `IS`,
+    `DLLBH`), not the internal ID (e.g. `0-19`). Internal IDs are accepted by
+    `create_issue` and `get_project_fields` but YouTrack's search parser rejects
+    them with `invalid_query`. Use `list_projects` to see the short names.
+
     Examples:
-        "project: 0-1 #Unresolved"
+        "project: IS #Unresolved"
         "assignee: me State: Open"
         "summary: deploy created: 2026-05"
     """
