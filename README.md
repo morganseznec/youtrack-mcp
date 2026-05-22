@@ -50,6 +50,23 @@ ID    SHORT     NAME
 
 Reads `YOUTRACK_URL` and `YOUTRACK_TOKEN` from your environment, or falls back to the values you already gave `claude mcp add youtrack` (read from `~/.claude.json`), so once the MCP is registered you don't need to re-export anything.
 
+## Using it from Claude Code
+
+You never call these tools directly. You talk to Claude in natural language and Claude picks the right tool based on what you ask. Here are common prompts and what they trigger behind the scenes:
+
+| What you type | What Claude does |
+|---|---|
+| *"list my YouTrack projects"* | `list_projects()` |
+| *"what custom fields are available on project IS?"* | `get_project_fields("0-19")` |
+| *"is there a `.youtrack.yml` in this repo?"* | `find_youtrack_config(cwd)` |
+| *"find open tickets that mention 'timeout'"* | `search_issues("project: IS summary: timeout #Unresolved")` |
+| *"create a ticket for the login bug"* | `create_issue(...)` (drafts a title and description, then creates it) |
+| *"add a comment to IS-87 saying we're investigating"* | `add_comment("IS-87", "...")` |
+| *"close IS-87 with a comment about the fix"* | `add_comment(...)` then `close_issue("IS-87")` |
+| *"create and close a ticket recapping the work we just did"* | `create_and_close_issue(...)` |
+
+If you have a [`.youtrack.yml`](#per-project-automation-optional) in the repo, the [companion skill](#companion-skill-for-claude-code) kicks in automatically: it detects task-shaped language (*"il faut corriger…"*, *"we need to add…"*, *"TODO: …"*) and proposes or creates a ticket without you having to say *"create a ticket"* explicitly. With `auto_confirm: true`, it acts silently and just reports the YouTrack URL.
+
 ## Per-project automation (optional)
 
 Drop a `.youtrack.yml` at the root of a repo to opt that project into automatic ticket tracking:
@@ -92,7 +109,11 @@ mkdir -p ~/.claude/skills/youtrack-workflow && \
 
 Then restart Claude Code so the skill is picked up at session start.
 
-## Tool reference
+## Tool reference (for developers)
+
+> This section is for developers building another MCP client or wiring the server into a different agent. End users of Claude Code should read [Using it from Claude Code](#using-it-from-claude-code) instead.
+
+The MCP exposes 8 tools. They are prefixed `mcp__youtrack__` in Claude Code tool calls.
 
 | Tool | Purpose |
 |---|---|
@@ -100,7 +121,7 @@ Then restart Claude Code so the skill is picked up at session start.
 | `add_comment(issue_id, text)` | Append a Markdown comment |
 | `close_issue(issue_id, comment?, state?)` | Close. `state=None` auto-picks the project's canonical "done" state |
 | `create_and_close_issue(summary, ..., closing_comment?, state?)` | One-shot for after-the-fact tracking |
-| `search_issues(query, limit?)` | YouTrack query syntax (`project: 0-1 #Unresolved`, etc.) |
+| `search_issues(query, limit?)` | YouTrack query syntax. The `project:` operator expects the SHORT NAME (e.g. `IS`), not the internal ID. Example: `"project: IS #Unresolved"`. |
 | `list_projects()` | Discover project IDs |
 | `get_project_fields(project_id)` | Inspect custom fields and allowed values |
 | `find_youtrack_config(start_path)` | Locate the nearest `.youtrack.yml` walking up from start_path |
