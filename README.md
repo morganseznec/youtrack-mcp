@@ -4,12 +4,13 @@
 
 ## Features
 
-- **6 core tools**: `create_issue`, `add_comment`, `close_issue`, `create_and_close_issue`, `search_issues`, `list_projects`
+- **8 MCP tools**: `create_issue`, `add_comment`, `close_issue`, `create_and_close_issue`, `search_issues`, `list_projects`, `get_project_fields`, `find_youtrack_config`
 - **Per-project configuration** via a `.youtrack.yml` file dropped at the root of a repo: language, summary/description templates, custom field defaults, opt-in automation
 - **Server-side validation** of custom field values against the live project schema, with case-insensitive and punctuation-normalized fuzzy matching (`critical` → `Critical`, `won't fix` → `Won't fix`)
 - **Auto-resolution of close state** by querying the project's actual State field. No need to hardcode `Fixed` vs `Done` vs `Resolved`.
 - **Schema cache** with TTL to avoid hammering the API
-- **Optional companion skill** for Claude Code that automates the search → create → comment → close lifecycle, with a `notify-only` mode that acts without prompts
+- **`youtrack-projects` CLI helper** to list project IDs (YouTrack's UI doesn't expose them)
+- **Optional companion skill** for Claude Code that automates the search, create, comment, close lifecycle, with a `notify-only` mode that acts without prompts
 
 ## Quick install
 
@@ -79,7 +80,15 @@ A user-level skill at `~/.claude/skills/youtrack-workflow/` reads the `.youtrack
 3. Either proposes (`auto_confirm: false`) or directly creates/updates (`auto_confirm: true`)
 4. Tracks the issue through completion, then comments and closes with a recap
 
-To install: copy `skills/youtrack-workflow/SKILL.md` into `~/.claude/skills/youtrack-workflow/` (or run `mkdir -p ~/.claude/skills/youtrack-workflow && cp skills/youtrack-workflow/SKILL.md $_`).
+To install (one-liner, no clone required):
+
+```bash
+mkdir -p ~/.claude/skills/youtrack-workflow && \
+  curl -fsSL https://raw.githubusercontent.com/morganseznec/youtrack-mcp/main/skills/youtrack-workflow/SKILL.md \
+  -o ~/.claude/skills/youtrack-workflow/SKILL.md
+```
+
+Then restart Claude Code so the skill is picked up at session start.
 
 ## Tool reference
 
