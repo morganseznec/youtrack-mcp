@@ -65,7 +65,7 @@ You never call these tools directly. You talk to Claude in natural language and 
 | *"close IS-87 with a comment about the fix"* | `add_comment(...)` then `close_issue("IS-87")` |
 | *"create and close a ticket recapping the work we just did"* | `create_and_close_issue(...)` |
 
-If you have a [`.youtrack.yml`](#per-project-automation-optional) in the repo, the [companion skill](#companion-skill-for-claude-code) kicks in automatically: it detects task-shaped language (*"il faut corriger…"*, *"we need to add…"*, *"TODO: …"*) and proposes or creates a ticket without you having to say *"create a ticket"* explicitly. With `auto_confirm: true`, it acts silently and just reports the YouTrack URL.
+If you have a [`.youtrack.yml`](#per-project-automation-optional) in the repo, the [companion skill](#companion-skill-for-claude-code) kicks in automatically: it detects task-shaped phrasing (*"we need to add…"*, *"there's a bug in…"*, *"let's refactor…"*, *"TODO: …"*) and proposes or creates a ticket without you having to say *"create a ticket"* explicitly. With `auto_confirm: true`, it acts silently and just reports the YouTrack URL. The skill triggers on any language Claude understands (English, French, Spanish, German…); set `language` in your `.youtrack.yml` to control what language the ticket body is written in.
 
 ## Per-project automation (optional)
 
@@ -94,7 +94,7 @@ See **[youtrack.example.yml](youtrack.example.yml)** for the full annotated sche
 
 A user-level skill at `~/.claude/skills/youtrack-workflow/` reads the `.youtrack.yml` and orchestrates the workflow:
 
-1. Detects task language in the user's prompt (`"there's a bug"`, `"il faut corriger"`, `"TODO"`...)
+1. Detects task-shaped phrasing in the user's prompt (`"there's a bug"`, `"we need to add"`, `"TODO"`, …) in any language Claude understands
 2. Searches YouTrack for an existing matching issue
 3. Either proposes (`auto_confirm: false`) or directly creates/updates (`auto_confirm: true`)
 4. Tracks the issue through completion, then comments and closes with a recap
