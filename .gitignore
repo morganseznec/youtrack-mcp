@@ -29,3 +29,9 @@ uv.lock
 # local config (token in env, don't commit accidentally if a .env exists)
 .env
 .env.local
+
+# local dogfooding config: the maintainer's own .youtrack.yml that points to
+# their personal YouTrack instance. Users SHOULD commit a .youtrack.yml in
+# their own repos; this gitignore only applies to this MCP repo.
+.youtrack.yml
+.youtrack.yaml
