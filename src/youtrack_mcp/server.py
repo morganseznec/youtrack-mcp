@@ -89,6 +89,19 @@ class YouTrackError(Exception):
     pass
 
 
+def _redact(text: str) -> str:
+    """Strip any occurrence of the live token (or 'Bearer <token>') from a string.
+
+    YouTrack and proxies sometimes echo request headers back in error bodies. This
+    keeps the token out of exception messages that flow up to the MCP client.
+    """
+    if not text or not YOUTRACK_TOKEN:
+        return text
+    return text.replace(YOUTRACK_TOKEN, "<redacted>").replace(
+        f"Bearer {YOUTRACK_TOKEN}", "Bearer <redacted>"
+    )
+
+
 def _request(
     method: str,
     path: str,
@@ -114,8 +127,12 @@ def _request(
             text = resp.read().decode("utf-8")
             return json.loads(text) if text else {}
     except urllib.error.HTTPError as e:
-        detail = e.read().decode("utf-8", errors="replace")
-        raise YouTrackError(f"HTTP {e.code} on {method} {path}: {detail}") from e
+        detail = _redact(e.read().decode("utf-8", errors="replace"))
+        raise YouTrackError(f"HTTP {e.code} on {method} {path}: {detail}") from None
+    except urllib.error.URLError as e:
+        raise YouTrackError(f"network error on {method} {path}: {e.reason}") from None
+    except json.JSONDecodeError as e:
+        raise YouTrackError(f"invalid JSON in response from {method} {path}: {e}") from None
 
 
 def _issue_url(id_readable: str) -> str:
@@ -142,11 +159,25 @@ def _fetch_project_schema(project_id: str) -> dict:
             "$top": "100",
         },
     )
+    if not isinstance(raw, list):
+        raise YouTrackError(
+            f"Unexpected schema response shape for project {project_id}: {type(raw).__name__}"
+        )
     fields = []
-    for entry in raw or []:
+    for entry in raw:
+        if not isinstance(entry, dict):
+            continue
         f = entry.get("field") or {}
         bundle = entry.get("bundle") or {}
-        values = [v.get("name") for v in (bundle.get("values") or []) if v.get("name")]
+        if not isinstance(f, dict):
+            f = {}
+        if not isinstance(bundle, dict):
+            bundle = {}
+        values = [
+            v.get("name")
+            for v in (bundle.get("values") or [])
+            if isinstance(v, dict) and v.get("name")
+        ]
         fields.append({
             "name": f.get("name"),
             "type": (f.get("fieldType") or {}).get("id"),
@@ -181,10 +212,13 @@ def _match_value(user_input: str, allowed: list[str]) -> str | None:
     """Resolve user_input to a canonical value from `allowed`.
 
     Order: exact → case-insensitive → normalized. Returns the canonical form
-    (matching the project's casing/spelling) or None if no match.
+    (matching the project's casing/spelling) or None if no match. Empty or
+    whitespace-only input matches nothing.
     """
     if not allowed:
         return user_input  # field is open-valued
+    if not user_input or not user_input.strip():
+        return None
     for v in allowed:
         if v == user_input:
             return v
@@ -193,6 +227,8 @@ def _match_value(user_input: str, allowed: list[str]) -> str | None:
         if v.lower() == lower_input:
             return v
     norm = _normalize(user_input)
+    if not norm:
+        return None
     for v in allowed:
         if _normalize(v) == norm:
             return v
@@ -254,13 +290,18 @@ def _get_project_id_from_issue(issue_id: str) -> str:
         f"/issues/{issue_id}",
         params={"fields": "project(id)"},
     )
-    pid = ((result or {}).get("project") or {}).get("id")
+    if not isinstance(result, dict):
+        raise YouTrackError(
+            f"Unexpected response shape for issue '{issue_id}': {type(result).__name__}"
+        )
+    project = result.get("project")
+    pid = project.get("id") if isinstance(project, dict) else None
     if not pid:
         raise YouTrackError(f"Could not resolve project for issue '{issue_id}'")
     return pid
 
 
-# Map YouTrack field types to the $type discriminator the create payload needs.
+# Map YouTrack field types to the outer $type discriminator the create payload needs.
 # Discovered via /admin/projects/{pid}/customFields response.
 _CUSTOM_FIELD_TYPE_MAP = {
     "enum[1]": "SingleEnumIssueCustomField",
@@ -278,6 +319,18 @@ _CUSTOM_FIELD_TYPE_MAP = {
     "float": "SimpleIssueCustomField",
     "date": "SimpleIssueCustomField",
     "period": "PeriodIssueCustomField",
+}
+
+# Some YouTrack instances require an inner $type on the bundle element value too.
+# Maps outer field $type to the corresponding inner value $type.
+_INNER_VALUE_TYPE_MAP = {
+    "SingleEnumIssueCustomField": "EnumBundleElement",
+    "MultiEnumIssueCustomField": "EnumBundleElement",
+    "StateIssueCustomField": "StateBundleElement",
+    "SingleOwnedIssueCustomField": "OwnedBundleElement",
+    "SingleVersionIssueCustomField": "VersionBundleElement",
+    "MultiVersionIssueCustomField": "VersionBundleElement",
+    "SingleBuildIssueCustomField": "BuildBundleElement",
 }
 
 
@@ -300,15 +353,22 @@ def _build_custom_fields_payload(
     if not fields_input:
         return []
 
-    try:
-        schema = _get_project_schema_cached(project_id)
-    except YouTrackError:
-        schema = {"project_id": project_id, "fields": []}
+    # Fail fast: if we can't fetch the schema, validation is meaningless and the
+    # YouTrack API would reject our payload anyway with a less-helpful error.
+    schema = _get_project_schema_cached(project_id)
 
     field_by_name = {f["name"]: f for f in schema.get("fields", []) if f.get("name")}
     available = sorted(field_by_name.keys())
 
-    payload = []
+    def _wrap_bundle_value(ytype: str, name_value: str) -> dict[str, str]:
+        """Build the inner value dict, attaching the bundle $type if needed."""
+        inner: dict[str, str] = {"name": name_value}
+        inner_type = _INNER_VALUE_TYPE_MAP.get(ytype)
+        if inner_type:
+            inner["$type"] = inner_type
+        return inner
+
+    payload: list[dict[str, Any]] = []
     for name, value in fields_input.items():
         if field_by_name and name not in field_by_name:
             raise YouTrackError(
@@ -333,7 +393,7 @@ def _build_custom_fields_payload(
                         f"Allowed: {', '.join(allowed)}"
                     )
                 resolved.append(m)
-            entry = {"name": name, "$type": ytype, "value": [{"name": v} for v in resolved]}
+            entry = {"name": name, "$type": ytype, "value": [_wrap_bundle_value(ytype, v) for v in resolved]}
         elif ytype in ("SimpleIssueCustomField", "TextIssueCustomField", "PeriodIssueCustomField"):
             entry = {"name": name, "$type": ytype, "value": value}
         elif "User" in ytype:
@@ -345,33 +405,22 @@ def _build_custom_fields_payload(
                     f"Value '{value}' invalid for field '{name}' on project {project_id}. "
                     f"Allowed: {', '.join(allowed)}"
                 )
-            entry = {"name": name, "$type": ytype, "value": {"name": m}}
+            entry = {"name": name, "$type": ytype, "value": _wrap_bundle_value(ytype, m)}
 
         payload.append(entry)
 
     return payload
 
 
-@mcp.tool()
-def create_issue(
+def _create_issue_impl(
     summary: str,
     description: str = "",
     project_id: str | None = None,
     custom_fields: dict[str, Any] | None = None,
     tags: list[str] | None = None,
-) -> dict:
-    """Create a YouTrack issue.
-
-    Args:
-        summary: Issue title (required).
-        description: Markdown body (optional).
-        project_id: Project internal ID like "0-1". Defaults to YOUTRACK_DEFAULT_PROJECT_ID.
-        custom_fields: Optional {field_name: value} dict. Examples:
-            {"Priority": "Critical", "Type": "Bug", "Assignee": "morgan.s"}
-            Use get_project_fields() to discover valid field names and values.
-        tags: Optional list of tag names to attach to the issue.
-
-    Returns: {id, id_readable, summary, url}
+) -> dict[str, Any]:
+    """Plain-Python implementation. Called by the @mcp.tool wrapper below and by
+    create_and_close_issue, so that the latter doesn't depend on FastMCP internals.
     """
     pid = project_id or YOUTRACK_DEFAULT_PROJECT_ID
     if not pid:
@@ -396,12 +445,39 @@ def create_issue(
         body=body,
         params={"fields": "id,idReadable,summary"},
     )
+    if not isinstance(result, dict):
+        raise YouTrackError(f"Unexpected create_issue response shape: {type(result).__name__}")
     return {
         "id": result.get("id"),
         "id_readable": result.get("idReadable"),
         "summary": result.get("summary"),
         "url": _issue_url(result.get("idReadable", "")),
     }
+
+
+@mcp.tool()
+def create_issue(
+    summary: str,
+    description: str = "",
+    project_id: str | None = None,
+    custom_fields: dict[str, Any] | None = None,
+    tags: list[str] | None = None,
+) -> dict:
+    """Create a YouTrack issue.
+
+    Args:
+        summary: Issue title (required).
+        description: Markdown body (optional).
+        project_id: Project internal ID like "0-1". Defaults to YOUTRACK_DEFAULT_PROJECT_ID.
+        custom_fields: Optional {field_name: value} dict. Examples:
+            {"Priority": "Critical", "Type": "Bug", "Assignee": "morgan.s"}
+            Use get_project_fields() to discover valid field names and values.
+            Values are matched case-insensitively against the project schema.
+        tags: Optional list of tag names to attach to the issue.
+
+    Returns: {id, id_readable, summary, url}
+    """
+    return _create_issue_impl(summary, description, project_id, custom_fields, tags)
 
 
 @mcp.tool()
@@ -419,6 +495,49 @@ def add_comment(issue_id: str, text: str) -> dict:
         params={"fields": "id"},
     )
     return {"ok": True, "comment_id": result.get("id"), "issue_id": issue_id}
+
+
+def _close_issue_impl(
+    issue_id: str,
+    comment: str = "",
+    state: str | None = None,
+) -> dict[str, Any]:
+    """Plain-Python implementation, called by the @mcp.tool wrapper and by
+    create_and_close_issue.
+    """
+    project_id = _get_project_id_from_issue(issue_id)
+    schema = _get_project_schema_cached(project_id)
+    state_field = next(
+        (f for f in schema.get("fields", []) if f.get("name") == "State"),
+        None,
+    )
+    if state_field is None:
+        raise YouTrackError(
+            f"Project {project_id} has no 'State' field; cannot close issue {issue_id} "
+            "this way. Set the state manually or use a different YouTrack command."
+        )
+    allowed = state_field.get("values") or []
+
+    target_state = _resolve_state(state, allowed)
+    if not target_state:
+        raise YouTrackError(
+            f"Cannot resolve state '{state}' for project {project_id}. "
+            f"Allowed: {', '.join(allowed)}"
+        )
+
+    # Wrap the resolved state in braces so YouTrack treats multi-word names
+    # ("In Progress", "Won't fix") as a single token, not two arguments.
+    body: dict[str, Any] = {"query": f"State {{{target_state}}}"}
+    if comment:
+        body["comment"] = comment
+    _request("POST", f"/issues/{issue_id}/commands", body=body)
+    return {
+        "ok": True,
+        "issue_id": issue_id,
+        "state": target_state,
+        "project_id": project_id,
+        "requested_state": state,
+    }
 
 
 @mcp.tool()
@@ -442,36 +561,9 @@ def close_issue(
         comment: Optional closing comment (Markdown).
         state: Intent or canonical state name. Pass None to let the server pick.
 
-    Returns: {ok, issue_id, state, project_id}
+    Returns: {ok, issue_id, state, project_id, requested_state}
     """
-    project_id = _get_project_id_from_issue(issue_id)
-    schema = _get_project_schema_cached(project_id)
-    state_field = next(
-        (f for f in schema["fields"] if f.get("name") == "State"),
-        None,
-    )
-    allowed = (state_field or {}).get("values") or []
-
-    target_state = _resolve_state(state, allowed)
-    if not target_state:
-        if allowed:
-            raise YouTrackError(
-                f"Cannot resolve state '{state}' for project {project_id}. "
-                f"Allowed: {', '.join(allowed)}"
-            )
-        target_state = state or "Fixed"  # last resort if project has no State field
-
-    body: dict[str, Any] = {"query": f"State {target_state}"}
-    if comment:
-        body["comment"] = comment
-    _request("POST", f"/issues/{issue_id}/commands", body=body)
-    return {
-        "ok": True,
-        "issue_id": issue_id,
-        "state": target_state,
-        "project_id": project_id,
-        "requested_state": state,
-    }
+    return _close_issue_impl(issue_id, comment, state)
 
 
 @mcp.tool()
@@ -494,16 +586,14 @@ def create_and_close_issue(
     Accepts the same custom_fields/tags as create_issue.
     Returns the created (and now closed) issue info.
     """
-    create_fn = create_issue.fn if hasattr(create_issue, "fn") else create_issue
-    close_fn = close_issue.fn if hasattr(close_issue, "fn") else close_issue
-    issue = create_fn(
+    issue = _create_issue_impl(
         summary=summary,
         description=description,
         project_id=project_id,
         custom_fields=custom_fields,
         tags=tags,
     )
-    close_result = close_fn(
+    close_result = _close_issue_impl(
         issue_id=issue["id_readable"],
         comment=closing_comment,
         state=state,
@@ -525,9 +615,13 @@ def search_issues(query: str, limit: int = 10) -> list[dict]:
     params = {
         "query": query,
         "$top": str(limit),
-        "fields": "idReadable,summary,resolved,reporter(login),customFields(name,value(name))",
+        "fields": "idReadable,summary,resolved",
     }
     result = _request("GET", "/issues", params=params)
+    if not isinstance(result, list):
+        raise YouTrackError(
+            f"Unexpected search_issues response shape: {type(result).__name__}"
+        )
     return [
         {
             "id": item.get("idReadable"),
@@ -536,6 +630,7 @@ def search_issues(query: str, limit: int = 10) -> list[dict]:
             "url": _issue_url(item.get("idReadable", "")),
         }
         for item in result
+        if isinstance(item, dict)
     ]
 
 
@@ -661,9 +756,14 @@ def list_projects() -> list[dict]:
         "/admin/projects",
         params={"fields": "id,name,shortName", "$top": "100"},
     )
+    if not isinstance(result, list):
+        raise YouTrackError(
+            f"Unexpected list_projects response shape: {type(result).__name__}"
+        )
     return [
         {"id": p.get("id"), "name": p.get("name"), "short_name": p.get("shortName")}
         for p in result
+        if isinstance(p, dict)
     ]
 
 

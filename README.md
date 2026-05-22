@@ -111,6 +111,10 @@ Then restart Claude Code so the skill is picked up at session start.
 - [`uv`](https://github.com/astral-sh/uv) for the recommended install path
 - A YouTrack instance with a permanent token
 
+## Versioning and changelog
+
+This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html). See [CHANGELOG.md](CHANGELOG.md) for the history of each release.
+
 ## License
 
 MIT. See [LICENSE](LICENSE).

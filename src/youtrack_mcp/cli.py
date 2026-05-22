@@ -98,6 +98,14 @@ def _require_env() -> tuple[str, str]:
     return url, token
 
 
+def _redact(text: str, token: str) -> str:
+    if not text or not token:
+        return text
+    return text.replace(token, "<redacted>").replace(
+        f"Bearer {token}", "Bearer <redacted>"
+    )
+
+
 def _http_get(url: str, token: str, path: str, params: dict[str, str]) -> Any:
     full = f"{url}/api{path}?" + urllib.parse.urlencode(params)
     req = urllib.request.Request(
@@ -111,11 +119,14 @@ def _http_get(url: str, token: str, path: str, params: dict[str, str]) -> Any:
         with urllib.request.urlopen(req, timeout=15) as resp:
             return json.loads(resp.read().decode("utf-8"))
     except urllib.error.HTTPError as e:
-        body = e.read().decode("utf-8", errors="replace")
+        body = _redact(e.read().decode("utf-8", errors="replace"), token)
         sys.stderr.write(f"HTTP {e.code}: {body}\n")
         sys.exit(1)
     except urllib.error.URLError as e:
         sys.stderr.write(f"Network error: {e.reason}\n")
+        sys.exit(1)
+    except json.JSONDecodeError as e:
+        sys.stderr.write(f"Invalid JSON in response: {e}\n")
         sys.exit(1)
 
 
@@ -129,6 +140,11 @@ def list_projects() -> None:
         {"fields": "id,name,shortName", "$top": "200"},
     )
 
+    if not isinstance(projects, list):
+        sys.stderr.write(
+            f"Unexpected response shape: {type(projects).__name__}\n"
+        )
+        sys.exit(1)
     if not projects:
         print("No projects found (token may not have read access).")
         return
@@ -140,6 +156,7 @@ def list_projects() -> None:
             p.get("name") or "",
         )
         for p in projects
+        if isinstance(p, dict)
     ]
     id_w = max(len(r[0]) for r in rows)
     short_w = max(len(r[1]) for r in rows)
