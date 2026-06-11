@@ -13,7 +13,7 @@ There are three complementary paths. Use whichever fit; they stack.
 | CI script (here) | The pipeline | Strong (system of record) | Vendor the script + 2 secrets |
 | YouTrack-native commit commands | YouTrack VCS integration | Strong, zero custom code | Connect the repo in YouTrack |
 
-For the in-session path, Claude pulls the PR/MR status and downloads CI artifacts (coverage, JUnit, screenshots) through a connected GitHub/GitLab MCP or the `gh` / `glab` CLI, then attaches them to the ticket and links the issue back onto the PR/MR. See the skill's "Linking GitHub / GitLab" section. The CI script below does not need `gh`/`glab`: inside the pipeline it already has the native `CI_*` / `GITHUB_*` environment.
+For the in-session path, Claude pulls the PR/MR status and downloads CI artifacts (coverage, JUnit, screenshots) using the `gh` / `glab` CLI (available on every tier, GitLab Free included) or a connected GitHub/GitLab MCP, then attaches them to the ticket and links the issue back onto the PR/MR. Note: GitLab's official MCP is Premium/Ultimate (Beta), so `glab` is the universal path; community GitLab MCP servers work on Free. See the skill's "Linking GitHub / GitLab" section. The CI script below does not need `gh`/`glab`: inside the pipeline it already has the native `CI_*` / `GITHUB_*` environment.
 
 ## 1. CI script
 
