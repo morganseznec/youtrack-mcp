@@ -79,3 +79,19 @@ ignore_paths: []
 #   - vendor/
 #   - node_modules/
 #   - .gradle/
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Evidence trail. Automatic proof comments on the tracked ticket.
+# ─────────────────────────────────────────────────────────────────────────────
+# When enabled, the skill posts short factual comments at meaningful checkpoints
+# (tests ran, build done, commit pushed, deploy applied), each anchored to the
+# commit SHA and labeled as coming from the local session. Useful for change
+# management and ISO/SOC2-style review. See the skill docs for the format and
+# the integrity rules (it never fabricates a result).
+evidence:
+  enabled: false                    # opt-in
+  on: [tests, build, commit, deploy]  # which checkpoints produce a comment
+  attach_artifacts: true            # also upload junit.xml / coverage / logs
+#
+# For evidence posted by the CI pipeline itself (no Claude session), see the
+# examples/ci/ directory in the MCP server repo.

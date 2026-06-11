@@ -4,6 +4,43 @@ All notable changes to this project are documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.0] - 2026-06-11
+
+### Added
+
+An **automatic evidence trail**: attach factual, attributed proof of work (test results, reports, logs, pipeline links) to the YouTrack issue behind a branch or MR, from the Claude Code session and/or from CI. Useful for change management and ISO/SOC2-style review.
+
+- **`attach_file(issue_id, file_path, file_name?)`** tool (27 tools total). Uploads a local file to an issue via `POST /api/issues/{id}/attachments` (multipart). A new `_request_multipart` helper handles the upload; the shared HTTP error/redaction path was extracted into `_send` and reused. Reads are capped at 50 MB.
+- **Evidence behavior in the `youtrack-workflow` skill.** A new section documents when to post evidence (tests / build / commit / deploy checkpoints), how to resolve the issue from the branch / commit / MR (`IS-\d+`), an idempotency rule (one comment per commit + checkpoint via `get_issue_comments`), and a structured, language-aware comment format. Integrity rules are explicit: never fabricate a result, always state provenance ("session locale Claude Code"), and anchor to the commit SHA. Artifacts are attached via `attach_file` when available.
+- **`evidence` config block** in `.youtrack.yml` (`enabled`, `on`, `attach_artifacts`), wired into `find_youtrack_config` defaults and documented in `youtrack.example.yml`.
+- **CI integration under `examples/ci/`.** A provider-agnostic `youtrack-evidence.sh` (auto-detects GitLab CI and GitHub Actions: resolves the issue, posts the pipeline result, optionally attaches a report and applies a YouTrack command), plus drop-in `gitlab-ci.example.yml` and `github-actions.example.yml`. Best-effort by default (never fails the build) and idempotent per pipeline. The accompanying README also documents the zero-code **YouTrack-native commit-command** path (`IS-87 #Fixed`).
+
+### Notes
+
+- CI and test-parsing logic deliberately live in the pipeline / skill, not in the MCP server, which stays a thin YouTrack API layer. The CI script talks to the same REST endpoints the MCP uses.
+- `attach_file` is our own evidence-oriented tool with no JetBrains MCP equivalent.
+
+## [0.3.0] - 2026-06-11
+
+### Added
+
+Feature parity with (and a superset of) [JetBrains' official YouTrack MCP server](https://www.jetbrains.com/help/youtrack/server/model-context-protocol-server.html). The server now exposes **26 tools** (up from 8). New tools, all matching JetBrains' names:
+
+- **Issue reads and edits.** `get_issue` (full details with flattened custom fields, tags, links, and ISO timestamps), `update_issue` (summary / description / custom fields, with the same schema validation as `create_issue`), `change_issue_assignee`, and `create_draft_issue`.
+- **Comments and links.** `get_issue_comments` (paginated) and `link_issues` (typed relations via the commands endpoint: `relates to`, `depends on`, `is required for`, `duplicates`, `is duplicated by`, `subtask of`, `parent for`, with friendly aliases).
+- **Tags.** `manage_issue_tags` adds/removes tags by name, resolving each to its database id (YouTrack requires the id and never auto-creates tags). Unknown names are reported back rather than failing the whole call.
+- **Time tracking.** `log_work` accepts either `minutes` or a human `"1h 30m"` duration string, with optional date and work-item type (resolved against the project's time-tracking settings).
+- **Knowledge base.** `create_article`, `get_article`, `update_article`, and `search_articles` (title substring search, since YouTrack exposes no full-text article query).
+- **Discovery.** `get_project`, `find_user`, `get_current_user`, `find_user_groups`, `get_user_group_members`, and `get_saved_issue_searches`.
+- **Pagination** (`offset`) added to `search_issues`, matching JetBrains' offset/limit.
+- **62 new unit tests** (108 total) covering duration parsing, link-type resolution, custom-field value flattening, date/timestamp conversion, client-side filtering of `find_user` / `search_articles`, and the exact request payloads for `update_issue`, `change_issue_assignee`, `link_issues`, `manage_issue_tags`, `log_work`, and `get_issue`.
+
+### Notes
+
+- The existing tools (`add_comment`, `list_projects`, `get_project_fields`) keep their original short names for backward compatibility. JetBrains calls these `add_issue_comment`, `find_projects`, and `get_issue_fields_schema` respectively.
+- `create_draft_issue` uses YouTrack's `/admin/users/me/drafts` endpoint, which JetBrains documents as semi-public and subject to change. Prefer `create_issue` for normal use.
+- Not yet implemented: per-call visibility restrictions (`permittedUsers` / `permittedGroups`) that JetBrains supports on `create_issue` / `add_comment` / `create_article`.
+
 ## [0.2.0] - 2026-05-22
 
 ### Security
@@ -72,6 +109,8 @@ First public release.
 - **In-process schema cache** with 10-minute TTL.
 - **Per-project writing conventions** in `.youtrack.yml`: language, summary/description templates with variable interpolation, custom field defaults.
 
+[0.4.0]: https://github.com/morganseznec/youtrack-mcp/releases/tag/v0.4.0
+[0.3.0]: https://github.com/morganseznec/youtrack-mcp/releases/tag/v0.3.0
 [0.2.0]: https://github.com/morganseznec/youtrack-mcp/releases/tag/v0.2.0
 [0.1.1]: https://github.com/morganseznec/youtrack-mcp/releases/tag/v0.1.1
 [0.1.0]: https://github.com/morganseznec/youtrack-mcp/releases/tag/v0.1.0

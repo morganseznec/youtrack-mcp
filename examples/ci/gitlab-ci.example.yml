@@ -1,0 +1,35 @@
+# GitLab CI: post YouTrack evidence after tests.
+#
+# Two prerequisites:
+#   1. Add masked CI/CD variables YOUTRACK_URL and YOUTRACK_TOKEN
+#      (Settings > CI/CD > Variables). Use a token scoped to the project.
+#   2. Vendor youtrack-evidence.sh in your repo (e.g. ci/youtrack-evidence.sh),
+#      or curl it in the job. The path below assumes examples/ci/.
+#
+# The `after_script` pattern is recommended: it runs on success AND failure, and
+# $CI_JOB_STATUS reflects the test job's real outcome. Evidence is best-effort,
+# so a YouTrack outage never turns your build red.
+
+test:
+  stage: test
+  image: python:3.12-slim
+  script:
+    # Produce a machine-readable report to attach as proof, and a one-line summary.
+    - pip install -e ".[dev]" >/dev/null
+    - pytest -q --junitxml=junit.xml | tee pytest.log
+  after_script:
+    - command -v jq >/dev/null || (apt-get update -y >/dev/null && apt-get install -y jq git curl >/dev/null)
+    - export YT_STATUS="$CI_JOB_STATUS"
+    - export YT_SUMMARY="$(tail -n 1 pytest.log 2>/dev/null)"
+    - export YT_ARTIFACTS="junit.xml"
+    # Optional: move the ticket along when tests pass.
+    # - if [ "$CI_JOB_STATUS" = "success" ]; then export YT_COMMAND="add tag ci-green"; fi
+    - bash examples/ci/youtrack-evidence.sh
+  artifacts:
+    when: always
+    reports:
+      junit: junit.xml
+
+# The issue id is auto-detected from the MR source branch, the MR title, or the
+# commit message (pattern [A-Z][A-Z0-9_]*-[0-9]+, e.g. IS-87). Override with
+# `export YT_ISSUE=IS-87` if your branch names don't carry it.

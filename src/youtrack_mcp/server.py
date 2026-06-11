@@ -9,6 +9,7 @@ Env vars (read at startup):
 """
 
 import json
+import mimetypes
 import os
 import re
 import shlex
@@ -17,6 +18,8 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+import uuid
+from datetime import datetime, timezone
 from pathlib import Path
 from threading import Lock
 from typing import Any
@@ -102,6 +105,21 @@ def _redact(text: str) -> str:
     )
 
 
+def _send(req: urllib.request.Request, method: str, path: str, timeout: int = 15) -> Any:
+    """Execute a prepared Request and parse the JSON response, wrapping errors."""
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            text = resp.read().decode("utf-8")
+            return json.loads(text) if text else {}
+    except urllib.error.HTTPError as e:
+        detail = _redact(e.read().decode("utf-8", errors="replace"))
+        raise YouTrackError(f"HTTP {e.code} on {method} {path}: {detail}") from None
+    except urllib.error.URLError as e:
+        raise YouTrackError(f"network error on {method} {path}: {e.reason}") from None
+    except json.JSONDecodeError as e:
+        raise YouTrackError(f"invalid JSON in response from {method} {path}: {e}") from None
+
+
 def _request(
     method: str,
     path: str,
@@ -122,17 +140,45 @@ def _request(
         data = json.dumps(body).encode("utf-8")
 
     req = urllib.request.Request(url, data=data, headers=headers, method=method)
-    try:
-        with urllib.request.urlopen(req, timeout=15) as resp:
-            text = resp.read().decode("utf-8")
-            return json.loads(text) if text else {}
-    except urllib.error.HTTPError as e:
-        detail = _redact(e.read().decode("utf-8", errors="replace"))
-        raise YouTrackError(f"HTTP {e.code} on {method} {path}: {detail}") from None
-    except urllib.error.URLError as e:
-        raise YouTrackError(f"network error on {method} {path}: {e.reason}") from None
-    except json.JSONDecodeError as e:
-        raise YouTrackError(f"invalid JSON in response from {method} {path}: {e}") from None
+    return _send(req, method, path)
+
+
+def _request_multipart(
+    path: str,
+    file_parts: list[tuple[str, str, bytes, str]],
+    params: dict | None = None,
+    timeout: int = 60,
+) -> Any:
+    """POST multipart/form-data (used for file attachments).
+
+    file_parts is a list of (field_name, filename, content_bytes, content_type).
+    YouTrack's attachments endpoint expects the file under the form field `upload`.
+    """
+    url = f"{YOUTRACK_URL}/api{path}"
+    if params:
+        url += "?" + urllib.parse.urlencode(params)
+
+    boundary = f"----youtrackmcp{uuid.uuid4().hex}"
+    bb = boundary.encode("ascii")
+    body = bytearray()
+    for field, filename, content, content_type in file_parts:
+        safe_name = filename.replace('"', "").replace("\r", "").replace("\n", "")
+        body += b"--" + bb + b"\r\n"
+        body += (
+            f'Content-Disposition: form-data; name="{field}"; filename="{safe_name}"\r\n'
+            f"Content-Type: {content_type}\r\n\r\n"
+        ).encode("utf-8")
+        body += content
+        body += b"\r\n"
+    body += b"--" + bb + b"--\r\n"
+
+    headers = {
+        "Authorization": f"Bearer {YOUTRACK_TOKEN}",
+        "Accept": "application/json",
+        "Content-Type": f"multipart/form-data; boundary={boundary}",
+    }
+    req = urllib.request.Request(url, data=bytes(body), headers=headers, method="POST")
+    return _send(req, "POST", path, timeout=timeout)
 
 
 def _issue_url(id_readable: str) -> str:
@@ -615,13 +661,18 @@ def create_and_close_issue(
 
 
 @mcp.tool()
-def search_issues(query: str, limit: int = 10) -> list[dict]:
+def search_issues(query: str, limit: int = 10, offset: int = 0) -> list[dict]:
     """Search issues using YouTrack query syntax.
 
     Note: the `project:` operator expects the project's SHORT NAME (e.g. `IS`,
     `DLLBH`), not the internal ID (e.g. `0-19`). Internal IDs are accepted by
     `create_issue` and `get_project_fields` but YouTrack's search parser rejects
     them with `invalid_query`. Use `list_projects` to see the short names.
+
+    Args:
+        query: YouTrack search query.
+        limit: Max results to return (page size).
+        offset: Number of results to skip, for pagination.
 
     Examples:
         "project: IS #Unresolved"
@@ -631,6 +682,7 @@ def search_issues(query: str, limit: int = 10) -> list[dict]:
     params = {
         "query": query,
         "$top": str(limit),
+        "$skip": str(offset),
         "fields": "idReadable,summary,resolved",
     }
     result = _request("GET", "/issues", params=params)
@@ -693,6 +745,11 @@ def find_youtrack_config(start_path: str) -> dict:
         "default_tags": [],
         "default_assignee": None,
         "ignore_paths": [],
+        "evidence": {
+            "enabled": False,
+            "on": ["tests", "build", "commit", "deploy"],
+            "attach_artifacts": True,
+        },
     }
 
     try:
@@ -781,6 +838,967 @@ def list_projects() -> list[dict]:
         for p in result
         if isinstance(p, dict)
     ]
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Helpers for the JetBrains-parity tools (v0.3)
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+def _article_url(id_readable: str) -> str:
+    return f"{YOUTRACK_URL}/articles/{id_readable}"
+
+
+def _ms_to_iso(ms: Any) -> Any:
+    """Convert a YouTrack epoch-milliseconds timestamp to an ISO 8601 UTC string.
+
+    YouTrack returns timestamps as epoch milliseconds. Returns the input
+    unchanged if it is None or not a number we can convert.
+    """
+    if ms is None or not isinstance(ms, (int, float)):
+        return ms
+    try:
+        return datetime.fromtimestamp(ms / 1000, tz=timezone.utc).isoformat()
+    except (ValueError, OSError, OverflowError):
+        return ms
+
+
+def _date_to_ms(date: Any) -> int:
+    """Accept a 'YYYY-MM-DD' string or epoch-millis int and return epoch millis."""
+    if isinstance(date, bool):  # bool is an int subclass; reject it explicitly
+        raise YouTrackError("invalid date: expected 'YYYY-MM-DD' or epoch millis")
+    if isinstance(date, int):
+        return date
+    if isinstance(date, str):
+        s = date.strip()
+        if s.isdigit():
+            return int(s)
+        try:
+            dt = datetime.strptime(s, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+        except ValueError:
+            raise YouTrackError(f"invalid date '{date}', expected 'YYYY-MM-DD'") from None
+        return int(dt.timestamp() * 1000)
+    raise YouTrackError(f"invalid date {date!r}, expected 'YYYY-MM-DD' or epoch millis")
+
+
+# YouTrack default working time: 8h workday, 5-day workweek. Used to interpret
+# 'd' and 'w' in human duration strings. Instances can reconfigure this, so 'd'
+# and 'w' are best-effort; prefer 'h'/'m' for exactness.
+def _parse_duration_to_minutes(s: str) -> int:
+    """Parse a human duration like '1h 30m', '90m', '2h', '1d' into minutes.
+
+    A bare integer string is treated as minutes. Supports w/d/h/m units. Returns
+    0 if nothing parseable is found.
+    """
+    if not s:
+        return 0
+    s = s.strip().lower()
+    if s.isdigit():
+        return int(s)
+    total = 0
+    found = False
+    for num, unit in re.findall(r"(\d+)\s*([wdhm])", s):
+        found = True
+        n = int(num)
+        total += n * {"w": 5 * 8 * 60, "d": 8 * 60, "h": 60, "m": 1}[unit]
+    return total if found else 0
+
+
+# Friendly link-type aliases → the YouTrack command phrase. Keys are _normalize()d.
+# Direction matters: "depends on X" means this issue depends on X.
+_LINK_TYPE_PHRASES = {
+    "relates": "relates to",
+    "relatesto": "relates to",
+    "related": "relates to",
+    "relatedto": "relates to",
+    "depends": "depends on",
+    "dependson": "depends on",
+    "requiredfor": "is required for",
+    "isrequiredfor": "is required for",
+    "duplicates": "duplicates",
+    "duplicate": "duplicates",
+    "duplicatedby": "is duplicated by",
+    "isduplicatedby": "is duplicated by",
+    "subtaskof": "subtask of",
+    "subtask": "subtask of",
+    "child": "subtask of",
+    "childof": "subtask of",
+    "parentfor": "parent for",
+    "parent": "parent for",
+}
+
+
+def _resolve_link_phrase(link_type: str | None) -> str:
+    """Map a user-supplied link type to a YouTrack command phrase.
+
+    Defaults to "relates to" when link_type is None/empty. Raises YouTrackError
+    listing supported phrases on an unrecognized value.
+    """
+    if not link_type or not link_type.strip():
+        return "relates to"
+    phrase = _LINK_TYPE_PHRASES.get(_normalize(link_type))
+    if phrase is None:
+        supported = sorted(set(_LINK_TYPE_PHRASES.values()))
+        raise YouTrackError(
+            f"Unknown link type '{link_type}'. Supported: {', '.join(supported)}"
+        )
+    return phrase
+
+
+def _flatten_cf_value(value: Any) -> Any:
+    """Reduce a customFields 'value' (dict | list | scalar | None) to a readable form.
+
+    Picks the most meaningful attribute of a bundle/user value: name → fullName →
+    login → text → presentation → minutes. Lists are flattened element-wise.
+    Bare scalars (integer/float/date-as-millis fields) pass through unchanged.
+    """
+    if value is None:
+        return None
+    if isinstance(value, list):
+        return [_flatten_cf_value(v) for v in value]
+    if isinstance(value, dict):
+        for key in ("name", "fullName", "login", "text", "presentation", "minutes"):
+            if value.get(key) is not None:
+                return value[key]
+        return None
+    return value
+
+
+def _flatten_links(links: Any) -> list[dict]:
+    """Flatten an issue's `links` array into [{relation, issues:[idReadable,...]}].
+
+    Uses the direction to pick the human-readable relation name
+    (OUTWARD → sourceToTarget, INWARD → targetToSource). Link entries with no
+    linked issues are dropped.
+    """
+    out: list[dict] = []
+    for link in links or []:
+        if not isinstance(link, dict):
+            continue
+        link_type = link.get("linkType") or {}
+        direction = link.get("direction")
+        if direction == "OUTWARD":
+            relation = link_type.get("sourceToTarget")
+        elif direction == "INWARD":
+            relation = link_type.get("targetToSource")
+        else:
+            relation = link_type.get("name")
+        issues = [
+            i.get("idReadable")
+            for i in (link.get("issues") or [])
+            if isinstance(i, dict) and i.get("idReadable")
+        ]
+        if issues:
+            out.append({"relation": relation, "issues": issues})
+    return out
+
+
+def _map_user(u: Any) -> dict:
+    """Project a YouTrack User entity into a compact dict."""
+    if not isinstance(u, dict):
+        return {}
+    return {
+        "id": u.get("id"),
+        "login": u.get("login"),
+        "full_name": u.get("fullName"),
+        "email": u.get("email"),
+    }
+
+
+_ISSUE_DETAIL_FIELDS = (
+    "idReadable,summary,description,created,updated,resolved,"
+    "reporter(login,fullName),project(id,shortName,name),"
+    "customFields(name,value(name,login,fullName,text,presentation,minutes)),"
+    "commentsCount,tags(name),"
+    "links(direction,linkType(name,sourceToTarget,targetToSource),issues(idReadable))"
+)
+
+_ARTICLE_DETAIL_FIELDS = (
+    "idReadable,summary,content,created,updated,reporter(login),project(id,name),"
+    "parentArticle(idReadable),childArticles(idReadable,summary)"
+)
+
+
+def _update_issue_impl(
+    issue_id: str,
+    summary: str | None = None,
+    description: str | None = None,
+    custom_fields: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Shared issue-update path. Used by update_issue and change_issue_assignee."""
+    body: dict[str, Any] = {}
+    if summary is not None:
+        body["summary"] = summary
+    if description is not None:
+        body["description"] = description
+    if custom_fields:
+        project_id = _get_project_id_from_issue(issue_id)
+        cf_payload = _build_custom_fields_payload(custom_fields, project_id)
+        if cf_payload:
+            body["customFields"] = cf_payload
+    if not body:
+        raise YouTrackError(
+            "update_issue: nothing to update "
+            "(provide summary, description, and/or custom_fields)"
+        )
+    result = _request(
+        "POST",
+        f"/issues/{issue_id}",
+        body=body,
+        params={"fields": "idReadable,summary"},
+    )
+    if not isinstance(result, dict):
+        raise YouTrackError(f"Unexpected update_issue response shape: {type(result).__name__}")
+    id_readable = result.get("idReadable", issue_id)
+    return {
+        "ok": True,
+        "issue_id": id_readable,
+        "summary": result.get("summary"),
+        "url": _issue_url(id_readable),
+    }
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Issue tools (JetBrains parity)
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+@mcp.tool()
+def get_issue(issue_id: str) -> dict:
+    """Retrieve full details of a single issue, including custom fields.
+
+    Args:
+        issue_id: Readable ID ("IS-87") or internal ID ("2-128").
+
+    Returns a dict with summary, description, flattened custom fields (State,
+    Priority, Assignee, ...), reporter, project short name, timestamps (ISO 8601),
+    tags, link relations, comment count, and the issue URL.
+    """
+    result = _request(
+        "GET",
+        f"/issues/{issue_id}",
+        params={"fields": _ISSUE_DETAIL_FIELDS},
+    )
+    if not isinstance(result, dict):
+        raise YouTrackError(f"Unexpected get_issue response shape: {type(result).__name__}")
+
+    fields: dict[str, Any] = {}
+    for cf in result.get("customFields") or []:
+        if isinstance(cf, dict) and cf.get("name"):
+            fields[cf["name"]] = _flatten_cf_value(cf.get("value"))
+
+    project = result.get("project") or {}
+    reporter = result.get("reporter") or {}
+    id_readable = result.get("idReadable", issue_id)
+    return {
+        "id": id_readable,
+        "summary": result.get("summary"),
+        "description": result.get("description"),
+        "fields": fields,
+        "reporter": reporter.get("login") if isinstance(reporter, dict) else None,
+        "project": project.get("shortName") if isinstance(project, dict) else None,
+        "created": _ms_to_iso(result.get("created")),
+        "updated": _ms_to_iso(result.get("updated")),
+        "resolved": _ms_to_iso(result.get("resolved")),
+        "is_resolved": result.get("resolved") is not None,
+        "comments_count": result.get("commentsCount"),
+        "tags": [t.get("name") for t in (result.get("tags") or []) if isinstance(t, dict)],
+        "links": _flatten_links(result.get("links")),
+        "url": _issue_url(id_readable),
+    }
+
+
+@mcp.tool()
+def update_issue(
+    issue_id: str,
+    summary: str | None = None,
+    description: str | None = None,
+    custom_fields: dict[str, Any] | None = None,
+) -> dict:
+    """Update an existing issue's summary, description, and/or custom fields.
+
+    Only the provided arguments are changed. `custom_fields` is a
+    {field_name: value} dict validated against the project schema exactly like
+    create_issue (use get_project_fields to discover names/values). Pass a value
+    of None to clear a field.
+
+    Args:
+        issue_id: Readable ID ("IS-87") or internal ID.
+        summary: New title, or None to leave unchanged.
+        description: New Markdown body, or None to leave unchanged.
+        custom_fields: {field_name: value} to set, e.g. {"Priority": "Critical"}.
+
+    Returns: {ok, issue_id, summary, url}
+    """
+    return _update_issue_impl(issue_id, summary, description, custom_fields)
+
+
+@mcp.tool()
+def change_issue_assignee(issue_id: str, assignee: str | None = None) -> dict:
+    """Assign an issue to a user, or unassign it.
+
+    Sets the project's "Assignee" custom field. The login is validated against
+    the project schema. Pass an empty string or None to unassign.
+
+    Args:
+        issue_id: Readable ID ("IS-87") or internal ID.
+        assignee: User login to assign, or None / "" to clear the assignee.
+
+    Returns: {ok, issue_id, assignee, url}
+    """
+    login = (assignee or "").strip() or None
+    result = _update_issue_impl(issue_id, custom_fields={"Assignee": login})
+    result["assignee"] = login
+    return result
+
+
+@mcp.tool()
+def create_draft_issue(
+    summary: str,
+    description: str = "",
+    project_id: str | None = None,
+) -> dict:
+    """Create a draft issue, visible only to you until published.
+
+    Drafts are a private staging area. To create a real, visible issue, use
+    create_issue instead. Note: the drafts endpoint is a semi-public YouTrack API
+    and may change between releases.
+
+    Args:
+        summary: Draft title.
+        description: Markdown body (optional).
+        project_id: Project internal ID. Defaults to YOUTRACK_DEFAULT_PROJECT_ID.
+
+    Returns: {id, id_readable, summary, draft: true}
+    """
+    pid = project_id or YOUTRACK_DEFAULT_PROJECT_ID
+    if not pid:
+        raise YouTrackError("project_id is required (no default configured)")
+    result = _request(
+        "POST",
+        "/admin/users/me/drafts",
+        body={"project": {"id": pid}, "summary": summary, "description": description},
+        params={"fields": "id,idReadable,summary"},
+    )
+    if not isinstance(result, dict):
+        raise YouTrackError(f"Unexpected create_draft_issue response shape: {type(result).__name__}")
+    return {
+        "id": result.get("id"),
+        "id_readable": result.get("idReadable"),
+        "summary": result.get("summary"),
+        "draft": True,
+    }
+
+
+@mcp.tool()
+def get_issue_comments(issue_id: str, limit: int = 50, offset: int = 0) -> list[dict]:
+    """List comments on an issue, most-recent pagination via limit/offset.
+
+    Args:
+        issue_id: Readable ID ("IS-87") or internal ID.
+        limit: Max comments to return.
+        offset: Number of comments to skip.
+
+    Returns a list of {id, text, author, created, updated, deleted}.
+    """
+    result = _request(
+        "GET",
+        f"/issues/{issue_id}/comments",
+        params={
+            "fields": "id,text,created,updated,author(login,fullName),deleted",
+            "$top": str(limit),
+            "$skip": str(offset),
+        },
+    )
+    if not isinstance(result, list):
+        raise YouTrackError(f"Unexpected get_issue_comments response shape: {type(result).__name__}")
+    out = []
+    for c in result:
+        if not isinstance(c, dict):
+            continue
+        author = c.get("author") or {}
+        out.append({
+            "id": c.get("id"),
+            "text": c.get("text"),
+            "author": author.get("login") if isinstance(author, dict) else None,
+            "created": _ms_to_iso(c.get("created")),
+            "updated": _ms_to_iso(c.get("updated")),
+            "deleted": c.get("deleted"),
+        })
+    return out
+
+
+# Cap in-memory attachment reads. Evidence files (reports, logs, coverage,
+# screenshots) are small; this guards against accidentally loading a huge file.
+_MAX_ATTACHMENT_BYTES = 50 * 1024 * 1024
+
+
+@mcp.tool()
+def attach_file(issue_id: str, file_path: str, file_name: str | None = None) -> dict:
+    """Attach a local file to an issue, e.g. as evidence of work done.
+
+    Ideal for audit trails: attach a JUnit/coverage report, a test log, a diff,
+    or a screenshot to the relevant ticket. The file is read from the local
+    filesystem and uploaded to YouTrack.
+
+    Args:
+        issue_id: Readable ID ("IS-87") or internal ID.
+        file_path: Absolute path to the local file to upload.
+        file_name: Optional name to show in YouTrack (defaults to the file's name).
+
+    Returns: {ok, issue_id, id, name, size, mime_type, url}
+    """
+    path_obj = Path(file_path).expanduser()
+    if not path_obj.is_file():
+        raise YouTrackError(f"attach_file: '{file_path}' is not a readable file")
+    size = path_obj.stat().st_size
+    if size > _MAX_ATTACHMENT_BYTES:
+        raise YouTrackError(
+            f"attach_file: '{file_path}' is {size} bytes, over the "
+            f"{_MAX_ATTACHMENT_BYTES // (1024 * 1024)} MB limit"
+        )
+    content = path_obj.read_bytes()
+    name = file_name or path_obj.name
+    content_type = mimetypes.guess_type(name)[0] or "application/octet-stream"
+
+    result = _request_multipart(
+        f"/issues/{issue_id}/attachments",
+        file_parts=[("upload", name, content, content_type)],
+        params={"fields": "id,name,size,mimeType,url"},
+    )
+    # YouTrack returns an array (one element per uploaded file).
+    item = result[0] if isinstance(result, list) and result else result
+    if not isinstance(item, dict):
+        raise YouTrackError(f"Unexpected attach_file response shape: {type(item).__name__}")
+    url = item.get("url")
+    if isinstance(url, str) and url.startswith("/"):
+        url = f"{YOUTRACK_URL}{url}"
+    return {
+        "ok": True,
+        "issue_id": issue_id,
+        "id": item.get("id"),
+        "name": item.get("name"),
+        "size": item.get("size"),
+        "mime_type": item.get("mimeType"),
+        "url": url,
+    }
+
+
+@mcp.tool()
+def link_issues(issue_id: str, target_issue_id: str, link_type: str = "relates") -> dict:
+    """Link two issues with a typed relation.
+
+    The relation reads "<issue_id> <link_type> <target_issue_id>", e.g.
+    link_issues("IS-10", "IS-3", "depends on") means IS-10 depends on IS-3.
+
+    Supported link_type values (aliases accepted): "relates to", "depends on",
+    "is required for", "duplicates", "is duplicated by", "subtask of",
+    "parent for". Defaults to "relates to".
+
+    Returns: {ok, issue_id, target_issue_id, link_type, command}
+    """
+    phrase = _resolve_link_phrase(link_type)
+    command = f"{phrase} {target_issue_id}"
+    _request(
+        "POST",
+        "/commands",
+        body={"query": command, "issues": [{"idReadable": issue_id}]},
+    )
+    return {
+        "ok": True,
+        "issue_id": issue_id,
+        "target_issue_id": target_issue_id,
+        "link_type": phrase,
+        "command": command,
+    }
+
+
+@mcp.tool()
+def manage_issue_tags(
+    issue_id: str,
+    add: list[str] | None = None,
+    remove: list[str] | None = None,
+) -> dict:
+    """Add and/or remove tags on an issue.
+
+    Tags are matched by name (case-insensitive). YouTrack does NOT auto-create
+    tags: a name in `add` that doesn't already exist (and isn't visible to you)
+    is reported under "not_found" rather than created. A name in `remove` that
+    isn't currently on the issue is likewise reported under "not_found".
+
+    Args:
+        issue_id: Readable ID ("IS-87") or internal ID.
+        add: Tag names to attach.
+        remove: Tag names to detach.
+
+    Returns: {ok, issue_id, added, removed, not_found}
+    """
+    add = add or []
+    remove = remove or []
+    added: list[str] = []
+    removed: list[str] = []
+    not_found: list[str] = []
+
+    if add:
+        all_tags = _request("GET", "/tags", params={"fields": "id,name", "$top": "1000"})
+        by_norm = {
+            _normalize(t["name"]): t["id"]
+            for t in (all_tags if isinstance(all_tags, list) else [])
+            if isinstance(t, dict) and t.get("name") and t.get("id")
+        }
+        for name in add:
+            tag_id = by_norm.get(_normalize(name))
+            if tag_id is None:
+                not_found.append(name)
+                continue
+            _request("POST", f"/issues/{issue_id}/tags", body={"id": tag_id})
+            added.append(name)
+
+    if remove:
+        issue_tags = _request(
+            "GET", f"/issues/{issue_id}/tags", params={"fields": "id,name"}
+        )
+        by_norm_issue = {
+            _normalize(t["name"]): t["id"]
+            for t in (issue_tags if isinstance(issue_tags, list) else [])
+            if isinstance(t, dict) and t.get("name") and t.get("id")
+        }
+        for name in remove:
+            tag_id = by_norm_issue.get(_normalize(name))
+            if tag_id is None:
+                not_found.append(name)
+                continue
+            _request("DELETE", f"/issues/{issue_id}/tags/{tag_id}")
+            removed.append(name)
+
+    return {
+        "ok": True,
+        "issue_id": issue_id,
+        "added": added,
+        "removed": removed,
+        "not_found": not_found,
+    }
+
+
+@mcp.tool()
+def get_saved_issue_searches() -> list[dict]:
+    """List saved searches visible to the current user.
+
+    Returns a list of {id, name, query, owner}. Use the `query` of one as input
+    to search_issues.
+    """
+    result = _request(
+        "GET",
+        "/savedQueries",
+        params={"fields": "id,name,query,owner(login)", "$top": "100"},
+    )
+    if not isinstance(result, list):
+        raise YouTrackError(f"Unexpected get_saved_issue_searches response shape: {type(result).__name__}")
+    out = []
+    for q in result:
+        if not isinstance(q, dict):
+            continue
+        owner = q.get("owner") or {}
+        out.append({
+            "id": q.get("id"),
+            "name": q.get("name"),
+            "query": q.get("query"),
+            "owner": owner.get("login") if isinstance(owner, dict) else None,
+        })
+    return out
+
+
+def _resolve_work_item_type(project_id: str, name: str) -> str | None:
+    """Resolve a work-item-type name to its id (project types, then global)."""
+    for path in (
+        f"/admin/projects/{project_id}/timeTrackingSettings/workItemTypes",
+        "/admin/timeTrackingSettings/workItemTypes",
+    ):
+        try:
+            types = _request("GET", path, params={"fields": "id,name", "$top": "100"})
+        except YouTrackError:
+            continue
+        for t in types if isinstance(types, list) else []:
+            if isinstance(t, dict) and _normalize(t.get("name") or "") == _normalize(name):
+                return t.get("id")
+    return None
+
+
+@mcp.tool()
+def log_work(
+    issue_id: str,
+    minutes: int | None = None,
+    duration: str | None = None,
+    text: str = "",
+    date: str | None = None,
+    work_type: str | None = None,
+) -> dict:
+    """Log time spent on an issue (a work item).
+
+    Provide the time as either `minutes` (int) or a human `duration` string like
+    "1h 30m" / "90m" / "2h" (parsed to minutes; 'd'=8h, 'w'=5d by YouTrack
+    defaults). One of the two is required.
+
+    Args:
+        issue_id: Readable ID ("IS-87") or internal ID.
+        minutes: Time spent in minutes.
+        duration: Human duration string, used if `minutes` is not given.
+        text: Optional work description.
+        date: Optional work date as "YYYY-MM-DD" (defaults to today).
+        work_type: Optional work-item-type name (resolved against the project).
+
+    Returns: {ok, issue_id, minutes, presentation, text, date, work_type}
+    """
+    mins = minutes if minutes is not None else (_parse_duration_to_minutes(duration or ""))
+    if not mins or mins <= 0:
+        raise YouTrackError(
+            "log_work requires a positive 'minutes' (int) or 'duration' string like '1h 30m'"
+        )
+    body: dict[str, Any] = {"duration": {"minutes": int(mins)}}
+    if text:
+        body["text"] = text
+    if date:
+        body["date"] = _date_to_ms(date)
+    if work_type:
+        project_id = _get_project_id_from_issue(issue_id)
+        type_id = _resolve_work_item_type(project_id, work_type)
+        if type_id is None:
+            raise YouTrackError(
+                f"Unknown work_type '{work_type}' for the issue's project. "
+                "Omit it or check the project's time-tracking settings."
+            )
+        body["type"] = {"id": type_id}
+
+    result = _request(
+        "POST",
+        f"/issues/{issue_id}/timeTracking/workItems",
+        body=body,
+        params={"fields": "id,duration(minutes,presentation),text,date,type(name)"},
+    )
+    if not isinstance(result, dict):
+        raise YouTrackError(f"Unexpected log_work response shape: {type(result).__name__}")
+    dur = result.get("duration") or {}
+    wtype = result.get("type") or {}
+    return {
+        "ok": True,
+        "issue_id": issue_id,
+        "minutes": dur.get("minutes") if isinstance(dur, dict) else int(mins),
+        "presentation": dur.get("presentation") if isinstance(dur, dict) else None,
+        "text": result.get("text"),
+        "date": _ms_to_iso(result.get("date")),
+        "work_type": wtype.get("name") if isinstance(wtype, dict) else None,
+    }
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Project / user / group tools (JetBrains parity)
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+@mcp.tool()
+def get_project(project_id: str) -> dict:
+    """Get details of a single project by internal ID or short name.
+
+    Returns: {id, name, short_name, description, leader, archived, created_by}
+    """
+    result = _request(
+        "GET",
+        f"/admin/projects/{project_id}",
+        params={
+            "fields": "id,name,shortName,description,"
+                      "leader(login,fullName),archived,createdBy(login)",
+        },
+    )
+    if not isinstance(result, dict):
+        raise YouTrackError(f"Unexpected get_project response shape: {type(result).__name__}")
+    leader = result.get("leader") or {}
+    created_by = result.get("createdBy") or {}
+    return {
+        "id": result.get("id"),
+        "name": result.get("name"),
+        "short_name": result.get("shortName"),
+        "description": result.get("description"),
+        "leader": leader.get("login") if isinstance(leader, dict) else None,
+        "archived": result.get("archived"),
+        "created_by": created_by.get("login") if isinstance(created_by, dict) else None,
+    }
+
+
+@mcp.tool()
+def find_user(query: str, limit: int = 20) -> list[dict]:
+    """Find users by login, full name, or email (substring, case-insensitive).
+
+    Args:
+        query: Text to match against login / full name / email.
+        limit: Max users to return.
+
+    Returns a list of {id, login, full_name, email}.
+    """
+    q = (query or "").strip()
+    ql = q.lower()
+    fields = "id,login,fullName,email"
+
+    def _filter(users: Any) -> list[dict]:
+        out = []
+        for u in users if isinstance(users, list) else []:
+            if not isinstance(u, dict):
+                continue
+            haystack = " ".join(
+                str(u.get(k) or "") for k in ("login", "fullName", "email")
+            ).lower()
+            if not ql or ql in haystack:
+                out.append(_map_user(u))
+            if len(out) >= limit:
+                break
+        return out
+
+    # Optimization: YouTrack Cloud accepts an (undocumented) `query` param on
+    # /users. Try it, but ALWAYS re-filter client-side: a build that ignores the
+    # param returns the full list, which must not leak through as "matches".
+    try:
+        res = _request("GET", "/users", params={"query": q, "fields": fields, "$top": "200"})
+        filtered = _filter(res)
+        if filtered:
+            return filtered
+    except YouTrackError:
+        pass
+
+    return _filter(_request("GET", "/users", params={"fields": fields, "$top": "500"}))
+
+
+@mcp.tool()
+def get_current_user() -> dict:
+    """Return the authenticated user (the token owner).
+
+    Returns: {id, login, full_name, email, banned, online}
+    """
+    result = _request(
+        "GET",
+        "/users/me",
+        params={"fields": "id,login,fullName,email,banned,online"},
+    )
+    if not isinstance(result, dict):
+        raise YouTrackError(f"Unexpected get_current_user response shape: {type(result).__name__}")
+    user = _map_user(result)
+    user["banned"] = result.get("banned")
+    user["online"] = result.get("online")
+    return user
+
+
+@mcp.tool()
+def find_user_groups(query: str = "", limit: int = 50) -> list[dict]:
+    """Find user groups by name.
+
+    Args:
+        query: Name substring to search for (empty returns all visible groups).
+        limit: Max groups to return.
+
+    Returns a list of {id, name, users_count}.
+    """
+    params: dict[str, str] = {"fields": "id,name,usersCount", "$top": str(limit)}
+    if query and query.strip():
+        params["query"] = query.strip()
+    result = _request("GET", "/groups", params=params)
+    if not isinstance(result, list):
+        raise YouTrackError(f"Unexpected find_user_groups response shape: {type(result).__name__}")
+    return [
+        {"id": g.get("id"), "name": g.get("name"), "users_count": g.get("usersCount")}
+        for g in result
+        if isinstance(g, dict)
+    ]
+
+
+@mcp.tool()
+def get_user_group_members(group_id: str, limit: int = 100, offset: int = 0) -> list[dict]:
+    """List the members of a user group.
+
+    Args:
+        group_id: Internal group ID (from find_user_groups).
+        limit: Max members to return.
+        offset: Number of members to skip.
+
+    Returns a list of {id, login, full_name, email}.
+    """
+    result = _request(
+        "GET",
+        f"/groups/{group_id}/users",
+        params={"fields": "id,login,fullName,email", "$top": str(limit), "$skip": str(offset)},
+    )
+    if not isinstance(result, list):
+        raise YouTrackError(f"Unexpected get_user_group_members response shape: {type(result).__name__}")
+    return [_map_user(u) for u in result if isinstance(u, dict)]
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Article (knowledge base) tools (JetBrains parity)
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+@mcp.tool()
+def create_article(
+    summary: str,
+    content: str = "",
+    project_id: str | None = None,
+    parent_article_id: str | None = None,
+) -> dict:
+    """Create a knowledge base article.
+
+    Args:
+        summary: Article title.
+        content: Markdown body (optional).
+        project_id: Project internal ID. Defaults to YOUTRACK_DEFAULT_PROJECT_ID.
+        parent_article_id: Optional parent article ID to nest this under.
+
+    Returns: {id, summary, url}
+    """
+    pid = project_id or YOUTRACK_DEFAULT_PROJECT_ID
+    if not pid:
+        raise YouTrackError("project_id is required (no default configured)")
+    body: dict[str, Any] = {"project": {"id": pid}, "summary": summary, "content": content}
+    if parent_article_id:
+        body["parentArticle"] = {"id": parent_article_id}
+    result = _request("POST", "/articles", body=body, params={"fields": "idReadable,summary"})
+    if not isinstance(result, dict):
+        raise YouTrackError(f"Unexpected create_article response shape: {type(result).__name__}")
+    id_readable = result.get("idReadable", "")
+    return {
+        "id": id_readable,
+        "summary": result.get("summary"),
+        "url": _article_url(id_readable),
+    }
+
+
+@mcp.tool()
+def get_article(article_id: str) -> dict:
+    """Get a knowledge base article, including its sub-articles.
+
+    Args:
+        article_id: Readable ID or internal ID of the article.
+
+    Returns the article content plus metadata, parent, and child articles.
+    """
+    result = _request(
+        "GET",
+        f"/articles/{article_id}",
+        params={"fields": _ARTICLE_DETAIL_FIELDS},
+    )
+    if not isinstance(result, dict):
+        raise YouTrackError(f"Unexpected get_article response shape: {type(result).__name__}")
+    project = result.get("project") or {}
+    reporter = result.get("reporter") or {}
+    parent = result.get("parentArticle") or {}
+    id_readable = result.get("idReadable", article_id)
+    return {
+        "id": id_readable,
+        "summary": result.get("summary"),
+        "content": result.get("content"),
+        "project": project.get("name") if isinstance(project, dict) else None,
+        "reporter": reporter.get("login") if isinstance(reporter, dict) else None,
+        "created": _ms_to_iso(result.get("created")),
+        "updated": _ms_to_iso(result.get("updated")),
+        "parent_article": parent.get("idReadable") if isinstance(parent, dict) else None,
+        "child_articles": [
+            {"id": c.get("idReadable"), "summary": c.get("summary")}
+            for c in (result.get("childArticles") or [])
+            if isinstance(c, dict)
+        ],
+        "url": _article_url(id_readable),
+    }
+
+
+@mcp.tool()
+def update_article(
+    article_id: str,
+    summary: str | None = None,
+    content: str | None = None,
+    parent_article_id: str | None = None,
+) -> dict:
+    """Update a knowledge base article's title, content, and/or parent.
+
+    Only the provided arguments are changed.
+
+    Args:
+        article_id: Readable ID or internal ID of the article.
+        summary: New title, or None to leave unchanged.
+        content: New Markdown body, or None to leave unchanged.
+        parent_article_id: New parent article ID, or None to leave unchanged.
+
+    Returns: {ok, id, summary, url}
+    """
+    body: dict[str, Any] = {}
+    if summary is not None:
+        body["summary"] = summary
+    if content is not None:
+        body["content"] = content
+    if parent_article_id is not None:
+        body["parentArticle"] = {"id": parent_article_id}
+    if not body:
+        raise YouTrackError(
+            "update_article: nothing to update "
+            "(provide summary, content, and/or parent_article_id)"
+        )
+    result = _request(
+        "POST",
+        f"/articles/{article_id}",
+        body=body,
+        params={"fields": "idReadable,summary"},
+    )
+    if not isinstance(result, dict):
+        raise YouTrackError(f"Unexpected update_article response shape: {type(result).__name__}")
+    id_readable = result.get("idReadable", article_id)
+    return {
+        "ok": True,
+        "id": id_readable,
+        "summary": result.get("summary"),
+        "url": _article_url(id_readable),
+    }
+
+
+@mcp.tool()
+def search_articles(query: str, limit: int = 20) -> list[dict]:
+    """Search knowledge base articles by title (case-insensitive substring).
+
+    Note: YouTrack's REST API has no full-text query for articles, so this
+    matches the `query` against article titles. It tries a server-side filter
+    first and falls back to listing titles and matching client-side.
+
+    Args:
+        query: Text to match against article titles.
+        limit: Max articles to return.
+
+    Returns a list of {id, summary, project}.
+    """
+    q = (query or "").strip()
+    ql = q.lower()
+    fields = "idReadable,summary,project(name)"
+
+    def _filter(articles: Any) -> list[dict]:
+        out = []
+        for a in articles if isinstance(articles, list) else []:
+            if not isinstance(a, dict):
+                continue
+            if not ql or ql in (a.get("summary") or "").lower():
+                project = a.get("project") or {}
+                out.append({
+                    "id": a.get("idReadable"),
+                    "summary": a.get("summary"),
+                    "project": project.get("name") if isinstance(project, dict) else None,
+                })
+            if len(out) >= limit:
+                break
+        return out
+
+    # Try a server-side query (undocumented for articles), but always re-filter
+    # client-side so an instance that ignores it can't return non-matching titles.
+    try:
+        res = _request("GET", "/articles", params={"query": q, "fields": fields, "$top": "200"})
+        filtered = _filter(res)
+        if filtered:
+            return filtered
+    except YouTrackError:
+        pass
+
+    return _filter(_request("GET", "/articles", params={"fields": fields, "$top": "500"}))
 
 
 def main() -> None:
