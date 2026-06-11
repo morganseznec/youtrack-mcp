@@ -199,8 +199,8 @@ When the work lives in a GitHub PR or a GitLab MR, enrich the evidence with the 
 
 Pick the channel in this order (use the first available):
 
-1. **A connected GitHub/GitLab MCP** (tools like `mcp__github__*` / `mcp__gitlab__*`): prefer it for fetching PRs/MRs, checks, and artifacts.
-2. **The `gh` / `glab` CLI** via Bash, when authenticated. Detect the provider from `git remote get-url origin` (github.com → `gh`; a GitLab host → `glab`).
+1. **The `gh` / `glab` CLI** via Bash, when authenticated. This is the default: both CLIs talk to the standard API and work on **every tier, including GitLab Free**. Detect the provider from `git remote get-url origin` (github.com → `gh`; a GitLab host → `glab`).
+2. **A connected GitHub/GitLab MCP** (tools like `mcp__github__*` / `mcp__gitlab__*`), if present, for the same data. Caveat: GitLab's **official** MCP is gated to Premium/Ultimate (Beta), so `glab` is the universal path on Free; community/open-source GitLab MCP servers work on any tier with a PAT. GitHub's official MCP is free.
 3. Neither available: skip VCS enrichment, still post the local evidence.
 
 **GitHub (`gh`)** for the current branch:
