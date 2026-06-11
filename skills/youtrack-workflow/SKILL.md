@@ -127,6 +127,117 @@ Hold onto the issue ID for the rest of the conversation. When the work is verifi
 - Call `mcp__youtrack__add_comment` with a recap of what was done, in the configured language, terse 3-6 bullets.
 - Then `mcp__youtrack__close_issue(issue_id, comment="...")` **without specifying `state`**. The server detects the project automatically and picks the canonical "done" state (Done / Fixed / Resolved, whichever exists). Only pass `state` explicitly when the user signals a different intent: `"wontfix"`, `"duplicate"`, `"rejected"`. Synonyms are translated to the project's actual state names.
 
+## Evidence trail (automatic proof comments)
+
+Beyond create/comment/close, the skill can maintain an **audit trail** on the tracked ticket: short, factual comments that record what was done and what the result was. This is valuable for change-management and ISO/SOC2-style review, where a ticket should carry proof that a change was tested before it shipped.
+
+Only active when `config.evidence.enabled` is true.
+
+### What counts as a checkpoint
+
+Post evidence at meaningful milestones, listed in `config.evidence.on` (default: `tests`, `build`, `commit`, `deploy`). Do NOT post on every command:
+
+- `tests`: a test suite ran for the tracked issue (e.g. `pytest`, `npm test`, `go test`).
+- `build`: a build / lint / typecheck completed.
+- `commit`: a commit referencing the issue was pushed.
+- `deploy`: a deploy, migration, or release was applied.
+
+Skip exploratory or unrelated runs, and runs you cannot tie to a tracked issue.
+
+### Which issue does the evidence attach to
+
+Resolve in this order:
+
+1. The issue already tracked in this session (held from steps 6-7).
+2. Otherwise extract `<SHORT>-<number>` (e.g. `IS-87`) from, in order: the current branch (`git branch --show-current`), recent commit subjects/bodies (`git log -n 20 --format=%s%n%b`), or the MR/PR title. Constrain the prefix with `config.project_short` when set.
+
+If no issue resolves, do nothing. Never guess a ticket.
+
+### Integrity rules (non-negotiable for audit)
+
+- **Never fabricate a result.** Report only what actually ran, with the real exit status and the tool's own summary. If a run failed, say it failed. If you did not run it, post nothing.
+- **State the provenance** explicitly: evidence from the session is labeled *"session locale Claude Code"*, never dressed up as a CI/system fact.
+- **Anchor to immutable references**: commit SHA (`git rev-parse --short HEAD`), branch name, the exact command, and a UTC timestamp. Auditable evidence points at things that can be re-checked.
+- Prefer pasting the tool's actual summary line (e.g. `111 passed in 0.31s`) over paraphrasing it.
+
+### Idempotency
+
+Before posting, call `get_issue_comments(issue_id)` and skip if an evidence comment for the **same commit SHA and same checkpoint** already exists. One evidence comment per (commit, checkpoint) keeps the trail clean.
+
+### Format
+
+A compact structured Markdown comment, written in `config.language`. Pass/fail examples:
+
+```
+🤖 Preuve : tests (session locale Claude Code)
+- Commit : `abc1234` · branche `feature/IS-87-redact`
+- Commande : `uv run pytest -q`
+- Résultat : ✅ 111 passed, 0 failed (0.31s)
+- 2026-06-11 14:40 UTC
+```
+```
+🤖 Preuve : tests (session locale Claude Code)
+- Commit : `abc1234`
+- Commande : `uv run pytest -q`
+- Résultat : ❌ 2 failed, 109 passed → `test_redact`, `test_close`
+- 2026-06-11 14:40 UTC
+```
+
+### Attach artifacts (audit-grade)
+
+When `config.evidence.attach_artifacts` is true and a machine-readable artifact exists (`junit.xml`, `coverage.xml`, a captured log, a screenshot), attach it and reference its name in the comment:
+
+```
+attach_file(issue_id="IS-87", file_path="/abs/path/junit.xml")
+```
+
+An attached report is far stronger proof than agent prose, because it is a verifiable artifact rather than a claim. Keep artifacts small and relevant.
+
+### Linking GitHub / GitLab (in-session)
+
+When the work lives in a GitHub PR or a GitLab MR, enrich the evidence with the real VCS/CI state and make the link two-way. **Claude is the bridge**: it reads from GitHub/GitLab and writes to YouTrack via this MCP. The YouTrack MCP itself never talks to GitHub/GitLab.
+
+Pick the channel in this order (use the first available):
+
+1. **A connected GitHub/GitLab MCP** (tools like `mcp__github__*` / `mcp__gitlab__*`): prefer it for fetching PRs/MRs, checks, and artifacts.
+2. **The `gh` / `glab` CLI** via Bash, when authenticated. Detect the provider from `git remote get-url origin` (github.com → `gh`; a GitLab host → `glab`).
+3. Neither available: skip VCS enrichment, still post the local evidence.
+
+**GitHub (`gh`)** for the current branch:
+
+```bash
+gh pr view --json number,url,state,title,headRefName     # the PR
+gh pr checks                                              # CI check states + links
+gh run list --branch "$(git branch --show-current)" -L 1 \
+  --json databaseId,workflowName,conclusion,url           # latest run
+gh run download <run-id> -D evidence                      # pull artifacts (coverage, junit, screenshots)
+gh pr comment <number> --body "Tracked in YouTrack: <issue-url>"   # link back (once)
+```
+
+**GitLab (`glab`)** for the current branch:
+
+```bash
+glab mr view                                  # the MR
+glab ci status                                # pipeline status for the branch
+glab ci artifact "<branch>" "<job-name>"      # pull a job's artifacts from the last pipeline
+glab mr note -m "Tracked in YouTrack: <issue-url>"   # link back (once)
+```
+
+Then on the YouTrack side:
+
+- Post a comment that includes the PR/MR URL, the pipeline/run URL, and the real pass/fail (label it as coming from the CI, which is stronger than a local run).
+- `attach_file(issue_id, "evidence/<file>")` for each downloaded artifact: test report, coverage, log, or a screenshot.
+- Add the YouTrack issue URL back onto the PR/MR exactly once (skip if already present), so the trace works both directions.
+
+This is the in-session path. When no Claude session is running, the MR pipeline itself posts the same kind of evidence: see `examples/ci/` in the MCP server repo.
+
+### Respecting the mode
+
+- **Notify-only** (`auto_confirm: true`): post the evidence and emit one line, e.g. `📎 Evidence on IS-87: ✅ tests 111/111 (commit abc1234)` or, with an artifact, `📎 Evidence on IS-87: ✅ tests + junit.xml attached`.
+- **Confirm mode** (`auto_confirm: false`): fold evidence into the natural flow (e.g. when you would already comment or close). Evidence is low-friction; do not add extra prompts or nag for it.
+
+For the **CI pipeline** side (evidence posted by the MR pipeline itself, without a Claude session), see the snippets and the YouTrack-native commit-command guide under `examples/ci/` in the MCP server repo. That path is stronger for audit because the evidence comes from the system of record, not the agent.
+
 ## Etiquette
 
 - One proposal per task. If the user says no, drop it. Don't re-propose for the same task.
@@ -161,6 +272,11 @@ custom_fields:              # discover with get_project_fields
 default_tags: []
 default_assignee: null
 ignore_paths: []
+
+evidence:                   # automatic proof comments on the tracked ticket
+  enabled: false            # opt-in
+  on: [tests, build, commit, deploy]
+  attach_artifacts: true    # also upload junit.xml / coverage / logs via attach_file
 ```
 
 A working example lives at the `youtrack.example.yml` in the MCP server's repo.

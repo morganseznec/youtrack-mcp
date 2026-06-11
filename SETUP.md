@@ -30,11 +30,16 @@ The token can only do what your YouTrack user can do. The MCP calls these endpoi
 
 | Operation | YouTrack permission needed (per project) |
 |---|---|
-| `list_projects`, `get_project_fields` | Read Project |
-| `search_issues` | Read Issue |
-| `create_issue` | Create Issue |
+| `list_projects`, `get_project`, `get_project_fields` | Read Project |
+| `search_issues`, `get_issue`, `get_issue_comments` | Read Issue |
+| `create_issue`, `create_draft_issue` | Create Issue |
 | `add_comment` | Update Issue (Add Comment) |
-| `close_issue` (state change via commands) | Update Issue (Apply Command) |
+| `update_issue`, `change_issue_assignee`, `manage_issue_tags` | Update Issue |
+| `close_issue`, `link_issues` (via commands) | Update Issue (Apply Command) |
+| `log_work` | Update Issue (or a dedicated Work Item permission if configured) |
+| `create_article`, `update_article` | Create / Update Article |
+| `get_article`, `search_articles` | Read Article |
+| `find_user`, `get_current_user`, `find_user_groups`, `get_user_group_members`, `get_saved_issue_searches` | Read User / Read User Group (Hub-level; usually granted to any authenticated user) |
 
 If your user already has the standard "Developer" or "Project Member" role on the projects you want to track from, you have everything you need. If you only want read access (search and inspect), you can use a token from a user who only has *Read Project* + *Read Issue* and the create/comment/close tools will simply fail with `HTTP 403` when called.
 

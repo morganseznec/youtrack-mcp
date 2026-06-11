@@ -1,0 +1,43 @@
+# GitHub Actions: post YouTrack evidence after tests.
+#
+# Prerequisites:
+#   1. Add repository secrets YOUTRACK_URL and YOUTRACK_TOKEN
+#      (Settings > Secrets and variables > Actions).
+#   2. Vendor youtrack-evidence.sh in your repo (path below assumes examples/ci/).
+#
+# ubuntu-latest runners already have git, curl, and jq. The evidence step uses
+# `if: always()` so it runs on pass and fail, and passes the job status through.
+
+name: tests
+on: [push, pull_request]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # so the script can read commit messages for the issue id
+
+      - name: Run tests
+        id: tests
+        run: |
+          pip install -e ".[dev]"
+          pytest -q --junitxml=junit.xml | tee pytest.log
+          echo "summary=$(tail -n 1 pytest.log)" >> "$GITHUB_OUTPUT"
+
+      - name: Post YouTrack evidence
+        if: always()
+        env:
+          YOUTRACK_URL: ${{ secrets.YOUTRACK_URL }}
+          YOUTRACK_TOKEN: ${{ secrets.YOUTRACK_TOKEN }}
+          YT_STATUS: ${{ job.status }}                 # success | failure | cancelled
+          YT_SUMMARY: ${{ steps.tests.outputs.summary }}
+          YT_ARTIFACTS: junit.xml
+          # Optional: move the ticket along when tests pass.
+          # YT_COMMAND: ${{ job.status == 'success' && 'add tag ci-green' || '' }}
+        run: bash examples/ci/youtrack-evidence.sh
+
+# The issue id is auto-detected from the PR head branch, the ref name, or the
+# commit message (pattern [A-Z][A-Z0-9_]*-[0-9]+, e.g. IS-87). Override with the
+# env var YT_ISSUE if your branch names don't carry it.
