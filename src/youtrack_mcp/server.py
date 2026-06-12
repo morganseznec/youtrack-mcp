@@ -380,6 +380,31 @@ _INNER_VALUE_TYPE_MAP = {
 }
 
 
+def _period_value(value: Any) -> dict[str, Any]:
+    """Coerce a period custom-field input into a YouTrack PeriodValue dict.
+
+    A period field's value must be an object ({"minutes": N}), never a bare
+    number: YouTrack rejects a raw int with a "this property only accepts a
+    PeriodValue-type value" 400. Accepts an int/float (minutes), a human
+    duration string ("1h 30m", "90m"; 'd'=8h, 'w'=5d by YouTrack defaults), or a
+    pre-built dict ({"minutes": N} / {"presentation": "..."}) which passes through.
+    """
+    if isinstance(value, dict):
+        return value
+    if isinstance(value, bool):  # bool is an int subclass; reject it explicitly
+        raise YouTrackError("invalid period value: expected minutes (int) or a duration string")
+    if isinstance(value, (int, float)):
+        return {"minutes": int(value)}
+    if isinstance(value, str):
+        minutes = _parse_duration_to_minutes(value)
+        if minutes <= 0:
+            raise YouTrackError(
+                f"could not parse period '{value}'; use minutes (int) or a duration like '1h 30m'"
+            )
+        return {"minutes": minutes}
+    raise YouTrackError(f"invalid period value {value!r}; expected minutes (int) or a duration string")
+
+
 def _build_custom_fields_payload(
     fields_input: dict[str, Any] | None,
     project_id: str,
@@ -391,10 +416,15 @@ def _build_custom_fields_payload(
       - Enum/state value that doesn't match (after case-insensitive + normalized
         fuzzy match) → raises YouTrackError listing allowed values.
 
-    Values can be:
-      - str  (enum/state name, user login, simple string)
-      - list (multi-enum / multi-user)
-      - None (clear the field)
+    Values are shaped per field type:
+      - enum/state/owned/version/build → name, matched against allowed values
+      - user                           → {"login": value}
+      - text                           → {"text": str(value)} (NOT a bare string)
+      - date / date-time               → epoch millis ("YYYY-MM-DD" auto-converted)
+      - period                         → {"minutes": N} (int or "1h 30m" accepted)
+      - string / integer / float       → the bare value
+      - list                           → multi-enum / multi-user
+      - None                           → clears the field
     """
     if not fields_input:
         return []
@@ -440,8 +470,20 @@ def _build_custom_fields_payload(
                     )
                 resolved.append(m)
             entry = {"name": name, "$type": ytype, "value": [_wrap_bundle_value(ytype, v) for v in resolved]}
-        elif ytype in ("SimpleIssueCustomField", "TextIssueCustomField", "PeriodIssueCustomField"):
-            entry = {"name": name, "$type": ytype, "value": value}
+        elif ytype == "TextIssueCustomField":
+            # A text field's value is a TextFieldValue object, not a bare string.
+            # YouTrack rejects a raw string with "this property only accepts a
+            # ...TextFieldValue-type value". The outer $type lets YouTrack infer
+            # the inner type, so no inner $type is needed.
+            entry = {"name": name, "$type": ytype, "value": {"text": str(value)}}
+        elif ytype == "PeriodIssueCustomField":
+            entry = {"name": name, "$type": ytype, "value": _period_value(value)}
+        elif ytype == "SimpleIssueCustomField":
+            # string / integer / float take the bare value; date and date-time
+            # take epoch milliseconds, so convert "YYYY-MM-DD" (ints pass
+            # through). A raw date string yields "Incompatible value format".
+            v = _date_to_ms(value) if "date" in (ft_id or "") else value
+            entry = {"name": name, "$type": ytype, "value": v}
         elif "User" in ytype:
             entry = {"name": name, "$type": ytype, "value": {"login": value}}
         else:
@@ -518,7 +560,10 @@ def create_issue(
         custom_fields: Optional {field_name: value} dict. Examples:
             {"Priority": "Critical", "Type": "Bug", "Assignee": "morgan.s"}
             Use get_project_fields() to discover valid field names and values.
-            Values are matched case-insensitively against the project schema.
+            Enum/state values are matched case-insensitively against the schema.
+            Text fields take a plain string; date fields take "YYYY-MM-DD" (or
+            epoch millis); period fields take minutes (int) or a duration like
+            "1h 30m"; multi-value fields take a list; None clears a field.
         tags: Optional list of tag names to attach to the issue.
 
     Returns: {id, id_readable, summary, url}
@@ -702,6 +747,35 @@ def search_issues(query: str, limit: int = 10, offset: int = 0) -> list[dict]:
     ]
 
 
+def _restore_evidence_on_key(evidence: dict) -> dict:
+    """Undo YAML 1.1 boolean coercion of an unquoted ``on:`` key.
+
+    PyYAML's ``safe_load`` parses the bare mapping key ``on`` as the boolean
+    ``True`` (the YAML 1.1 "Norway problem"), so an evidence block written as
+    ``on: [...]`` instead of ``"on": [...]`` arrives keyed by ``True`` rather than
+    the string ``"on"``. Remap it back so consumers can read ``evidence["on"]``.
+
+    An explicit string ``"on"`` key wins if both are present; the stray coerced
+    key is dropped either way. Non-dict input is returned untouched.
+    """
+    if not isinstance(evidence, dict):
+        return evidence
+    restored: dict = {}
+    coerced_on = None
+    found_coerced = False
+    for key, value in evidence.items():
+        # `key is True` (identity) avoids matching an integer key 1, since
+        # `1 == True` under `in`/`==` but not under `is`.
+        if key is True:
+            coerced_on = value
+            found_coerced = True
+        else:
+            restored[key] = value
+    if found_coerced:
+        restored.setdefault("on", coerced_on)
+    return restored
+
+
 @mcp.tool()
 def find_youtrack_config(start_path: str) -> dict:
     """Locate and parse a .youtrack.yml file in `start_path` or any ancestor directory.
@@ -781,6 +855,16 @@ def find_youtrack_config(start_path: str) -> dict:
                         "error": "config root must be a mapping",
                     }
                 merged = {**defaults, **raw}
+                # `evidence` is a nested mapping, so the shallow merge above lets a
+                # user block replace the whole default (dropping keys it omits).
+                # Deep-merge it over the defaults instead, and restore the `on:` key
+                # that YAML 1.1 coerces to boolean True when written unquoted.
+                raw_evidence = raw.get("evidence")
+                if isinstance(raw_evidence, dict):
+                    merged["evidence"] = {
+                        **defaults["evidence"],
+                        **_restore_evidence_on_key(raw_evidence),
+                    }
                 return {
                     "found": True,
                     "path": str(candidate),

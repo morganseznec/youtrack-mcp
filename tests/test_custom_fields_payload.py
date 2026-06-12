@@ -17,6 +17,9 @@ def _stub_schema(project_id):
             {"name": "Service", "type": "enum[*]", "values": ["AWS", "RDS", "EC2"]},
             {"name": "Component", "type": "text", "values": None},
             {"name": "Repository", "type": "string", "values": None},
+            {"name": "CVSS score", "type": "float", "values": None},
+            {"name": "Maintenance window", "type": "period", "values": None},
+            {"name": "Due Date", "type": "date", "values": None},
             {"name": "Assignee", "type": "user[1]", "values": None},
         ],
     }
@@ -62,13 +65,74 @@ def test_multi_enum_accepts_list():
     ]
 
 
-def test_text_field_no_inner_type():
+def test_text_field_wraps_value_in_text_object():
+    # YouTrack rejects a bare string for a text field with a TextFieldValue
+    # type-mismatch 400; the value must be {"text": ...}.
     payload = server._build_custom_fields_payload({"Component": "auth"}, "0-1")
     assert payload[0] == {
         "name": "Component",
         "$type": "TextIssueCustomField",
-        "value": "auth",
+        "value": {"text": "auth"},
     }
+
+
+def test_text_field_coerces_non_string_to_text():
+    payload = server._build_custom_fields_payload({"Component": 42}, "0-1")
+    assert payload[0]["value"] == {"text": "42"}
+
+
+def test_string_field_uses_bare_value():
+    payload = server._build_custom_fields_payload({"Repository": "org/repo"}, "0-1")
+    assert payload[0] == {
+        "name": "Repository",
+        "$type": "SimpleIssueCustomField",
+        "value": "org/repo",
+    }
+
+
+def test_float_field_uses_bare_value():
+    payload = server._build_custom_fields_payload({"CVSS score": 7.5}, "0-1")
+    assert payload[0] == {
+        "name": "CVSS score",
+        "$type": "SimpleIssueCustomField",
+        "value": 7.5,
+    }
+
+
+def test_period_field_from_int_minutes():
+    payload = server._build_custom_fields_payload({"Maintenance window": 90}, "0-1")
+    assert payload[0] == {
+        "name": "Maintenance window",
+        "$type": "PeriodIssueCustomField",
+        "value": {"minutes": 90},
+    }
+
+
+def test_period_field_from_duration_string():
+    payload = server._build_custom_fields_payload({"Maintenance window": "1h 30m"}, "0-1")
+    assert payload[0]["value"] == {"minutes": 90}
+
+
+def test_period_field_unparseable_raises():
+    with pytest.raises(server.YouTrackError, match="could not parse period"):
+        server._build_custom_fields_payload({"Maintenance window": "soon"}, "0-1")
+
+
+def test_date_field_converts_iso_to_millis():
+    payload = server._build_custom_fields_payload({"Due Date": "2026-06-20"}, "0-1")
+    assert payload[0]["$type"] == "SimpleIssueCustomField"
+    assert payload[0]["value"] == server._date_to_ms("2026-06-20")
+    assert isinstance(payload[0]["value"], int)
+
+
+def test_date_field_passes_epoch_millis_through():
+    payload = server._build_custom_fields_payload({"Due Date": 1781000000000}, "0-1")
+    assert payload[0]["value"] == 1781000000000
+
+
+def test_date_field_bad_format_raises():
+    with pytest.raises(server.YouTrackError, match="invalid date"):
+        server._build_custom_fields_payload({"Due Date": "20/06/2026"}, "0-1")
 
 
 def test_unknown_field_raises():
@@ -97,4 +161,10 @@ def test_user_field_emits_login():
 
 def test_none_value_clears_field():
     payload = server._build_custom_fields_payload({"Priority": None}, "0-1")
+    assert payload[0]["value"] is None
+
+
+def test_none_clears_text_field_without_wrapping():
+    # None must short-circuit to a null value, not become {"text": "None"}.
+    payload = server._build_custom_fields_payload({"Component": None}, "0-1")
     assert payload[0]["value"] is None

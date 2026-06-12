@@ -90,7 +90,9 @@ ignore_paths: []
 # the integrity rules (it never fabricates a result).
 evidence:
   enabled: false                    # opt-in
-  on: [tests, build, commit, deploy]  # which checkpoints produce a comment
+  # `on` is quoted on purpose: YAML 1.1 parses the bare key `on:` as boolean
+  # true (the "Norway problem"), which would hide the checkpoint list.
+  "on": [tests, build, commit, deploy]  # which checkpoints produce a comment
   attach_artifacts: true            # also upload junit.xml / coverage / logs
 #
 # For evidence posted by the CI pipeline itself (no Claude session), see the
