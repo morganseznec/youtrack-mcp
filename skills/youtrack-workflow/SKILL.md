@@ -275,7 +275,7 @@ ignore_paths: []
 
 evidence:                   # automatic proof comments on the tracked ticket
   enabled: false            # opt-in
-  on: [tests, build, commit, deploy]
+  "on": [tests, build, commit, deploy]   # quote `on`: YAML 1.1 reads the bare key as boolean true
   attach_artifacts: true    # also upload junit.xml / coverage / logs via attach_file
 ```
 

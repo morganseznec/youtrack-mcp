@@ -4,6 +4,18 @@ All notable changes to this project are documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.1] - 2026-06-12
+
+### Fixed
+
+- **Unquoted `on:` in the `evidence` block was silently dropped (YAML 1.1 "Norway problem").** PyYAML's `safe_load` parses the bare mapping key `on:` as the boolean `True`, not the string `"on"`, so `find_youtrack_config` returned an `evidence` dict with no `"on"` key. The `youtrack-workflow` skill, which reads `evidence["on"]`, then saw an empty checkpoint list and silently posted evidence at none of the configured `tests` / `build` / `commit` / `deploy` checkpoints. The key is now quoted in `youtrack.example.yml` and the skill docs, and `find_youtrack_config` defensively remaps a boolean-coerced `True` key back to `"on"`, so existing unquoted configs keep working without an edit. The `evidence` block is also now deep-merged over its defaults, so a partial block no longer drops the keys it omits.
+- **`text`, `period`, and `date` custom fields could not be set** via `create_issue` / `update_issue` / `create_and_close_issue`. `_build_custom_fields_payload` sent a bare value where YouTrack requires a typed object or a specific encoding, so each returned an HTTP 400. Now: `text` fields (e.g. `CVE ID`, `Remediation`, `Component`) send `{"text": ...}` (a raw string was rejected with `"this property only accepts a ...TextFieldValue-type value"`); `period` fields (e.g. `Maintenance window`) send `{"minutes": N}`, accepting an int or a duration string like `"1h 30m"` (a bare number was rejected the same way); `date` / date-time fields (e.g. `Due Date`) send epoch milliseconds, auto-converting a `"YYYY-MM-DD"` string (a raw string was rejected with `"Incompatible value format for type date"`). `string` / `integer` / `float` fields are unchanged. A new `_period_value` helper handles period coercion, reusing `_parse_duration_to_minutes`; date conversion reuses `_date_to_ms`. The create/update docstrings now document the per-type value formats. Verified end-to-end against YouTrack Cloud. Note: some fields are gated by instance workflow rules (e.g. `Remediation` is only writable when `Type` is `Vulnerability`) — that 400 is a server-side business rule the tool surfaces verbatim, not a payload bug.
+
+### Added
+
+- **11 unit tests** (`tests/test_find_youtrack_config.py`) covering the key-restoration helper, end-to-end parsing of both quoted and unquoted `on:`, the deep-merge fallback, and a guard that loads the shipped `youtrack.example.yml` through the parser so the bug cannot be reintroduced there.
+- **Custom-field tests** in `tests/test_custom_fields_payload.py` for the corrected `text` / `string` / `float` / `period` / `date` shapes and their error cases (parse failures, bad date formats, `None`-clears-without-wrapping). Full suite now at 132 tests.
+
 ## [0.4.0] - 2026-06-11
 
 ### Added
@@ -109,6 +121,7 @@ First public release.
 - **In-process schema cache** with 10-minute TTL.
 - **Per-project writing conventions** in `.youtrack.yml`: language, summary/description templates with variable interpolation, custom field defaults.
 
+[0.4.1]: https://github.com/morganseznec/youtrack-mcp/releases/tag/v0.4.1
 [0.4.0]: https://github.com/morganseznec/youtrack-mcp/releases/tag/v0.4.0
 [0.3.0]: https://github.com/morganseznec/youtrack-mcp/releases/tag/v0.3.0
 [0.2.0]: https://github.com/morganseznec/youtrack-mcp/releases/tag/v0.2.0
