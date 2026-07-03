@@ -63,7 +63,8 @@ You never call these tools directly. You talk to Claude in natural language and 
 | *"find open tickets that mention 'timeout'"* | `search_issues("project: IS summary: timeout #Unresolved")` |
 | *"create a ticket for the login bug"* | `create_issue(...)` (drafts a title and description, then creates it) |
 | *"add a comment to IS-87 saying we're investigating"* | `add_comment("IS-87", "...")` |
-| *"show me the full details of IS-87"* | `get_issue("IS-87")` |
+| *"show me the full details of IS-87"* | `get_issue("IS-87")` (description, comments, and attachment list) |
+| *"download the log attached to IS-87 so I can investigate"* | `get_issue("IS-87")` for the attachment id, then `download_attachment("IS-87", "a-1")` |
 | *"set IS-87 to Critical priority"* | `update_issue("IS-87", custom_fields={"Priority": "Critical"})` |
 | *"assign IS-87 to morgan"* | `change_issue_assignee("IS-87", "morgan.s")` |
 | *"mark IS-87 as a duplicate of IS-12"* | `link_issues("IS-87", "IS-12", "duplicates")` |
@@ -131,26 +132,29 @@ The guiding principle: evidence should be **verifiable and attributed**, not ass
 
 > This section is for developers building another MCP client or wiring the server into a different agent. End users of Claude Code should read [Using it from Claude Code](#using-it-from-claude-code) instead.
 
-The MCP exposes 27 tools. They are prefixed `mcp__youtrack__` in Claude Code tool calls.
+The MCP exposes 28 tools. They are prefixed `mcp__youtrack__` in Claude Code tool calls.
+
+**Structured output.** Every tool returns a `structuredContent` block with a declared `outputSchema` (a programmatic client reads only that; the readable text stays for LLM clients). Failures return `{"error": {"code", "message", "youtrack_status?", "retryable"}}` in `structuredContent` instead of raising, with codes `NOT_FOUND` / `PERMISSION_DENIED` / `VALIDATION_FAILED` / `RATE_LIMITED` / `YOUTRACK_UNAVAILABLE` (the last two `retryable`). List tools return `{items, count}` (or `{results, total}` for `search_issues`).
 
 **Issues**
 
 | Tool | Purpose |
 |---|---|
-| `create_issue(summary, description?, project_id?, custom_fields?, tags?)` | Create a new issue. Validates custom field names and values against the project schema |
-| `get_issue(issue_id)` | Full issue details: flattened custom fields, reporter, tags, links, timestamps, comment count |
-| `update_issue(issue_id, summary?, description?, custom_fields?)` | Update title, body, and/or custom fields (same validation as create). Pass `None` to clear a field |
+| `create_issue(summary, description?, project_id?, custom_fields?, tags?, idempotency_key?)` | Create a new issue. Validates custom fields against the project schema. `idempotency_key` dedupes via an `idem:{key}` tag (returns the existing issue with `idempotent_hit`) |
+| `get_issue(issue_id, include_comments?, include_attachments?, max_comments?)` | The rich read for triage: full (32 KB-truncated) description, flattened custom fields, reporter, tags, links, timestamps, inline comments, and attachment metadata |
+| `update_issue(issue_id, summary?, description?, custom_fields?, add_tags?, remove_tags?, create_missing_tags?)` | Triage in place: set fields (fuzzy-matched, `"__CLEAR__"` clears), add/remove tags. Returns the issue plus an `applied` block |
 | `change_issue_assignee(issue_id, assignee?)` | Assign to a user login, or unassign with `None`/`""` |
 | `create_draft_issue(summary, description?, project_id?)` | Create a private draft (semi-public YouTrack API) |
-| `add_comment(issue_id, text)` | Append a Markdown comment |
+| `add_comment(issue_id, text, attachments?)` | Append a Markdown comment, optionally uploading local files with it |
 | `get_issue_comments(issue_id, limit?, offset?)` | List comments, paginated |
 | `attach_file(issue_id, file_path, file_name?)` | Upload a local file (test report, log, coverage, screenshot) as an attachment |
+| `download_attachment(issue_id, attachment_id, dest_path?, max_size_bytes?)` | Download an attachment (log, screenshot, Sentry report) to disk; returns `path`, `sha256`, and a `text_preview` for text files. Refuses > 10 MB |
 | `link_issues(issue_id, target_issue_id, link_type?)` | Link two issues. `link_type`: `relates to`, `depends on`, `is required for`, `duplicates`, `is duplicated by`, `subtask of`, `parent for` |
-| `manage_issue_tags(issue_id, add?, remove?)` | Add/remove tags by name. Tags must already exist (YouTrack never auto-creates them) |
+| `manage_issue_tags(issue_id, add?, remove?, create_missing?)` | Add/remove tags by name. Creates unknown add-tags only when `create_missing` is set |
 | `log_work(issue_id, minutes?, duration?, text?, date?, work_type?)` | Log time. Accepts `minutes` or a `"1h 30m"` string |
 | `close_issue(issue_id, comment?, state?)` | Close. `state=None` auto-picks the project's canonical "done" state |
 | `create_and_close_issue(summary, ..., closing_comment?, state?)` | One-shot for after-the-fact tracking |
-| `search_issues(query, limit?, offset?)` | YouTrack query syntax. The `project:` operator expects the SHORT NAME (e.g. `IS`), not the internal ID. Example: `"project: IS #Unresolved"` |
+| `search_issues(query, limit?, offset?, fields?)` | YouTrack query syntax; `fields` = `"minimal"`/`"standard"`. Returns `{results, total}`. The `project:` operator expects the SHORT NAME (e.g. `IS`) |
 | `get_saved_issue_searches()` | List the current user's saved searches |
 
 **Knowledge base articles**
@@ -180,7 +184,7 @@ The MCP exposes 27 tools. They are prefixed `mcp__youtrack__` in Claude Code too
 |---|---|
 | `find_youtrack_config(start_path)` | Locate the nearest `.youtrack.yml` walking up from start_path |
 
-> **Naming vs JetBrains.** This server keeps its original short names for the tools that predate the JetBrains MCP: `add_comment` (JetBrains: `add_issue_comment`), `list_projects` (`find_projects`), `get_project_fields` (`get_issue_fields_schema`). All other tool names match JetBrains' server. `find_youtrack_config`, `create_and_close_issue`, and `close_issue` are extras with no JetBrains equivalent.
+> **Naming vs JetBrains.** This server keeps its original short names for the tools that predate the JetBrains MCP: `add_comment` (JetBrains: `add_issue_comment`), `list_projects` (`find_projects`), `get_project_fields` (`get_issue_fields_schema`). All other tool names match JetBrains' server. `find_youtrack_config`, `create_and_close_issue`, `close_issue`, `attach_file`, and `download_attachment` are extras with no JetBrains equivalent.
 
 ## Requirements
 

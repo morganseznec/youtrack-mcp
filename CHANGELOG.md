@@ -4,6 +4,33 @@ All notable changes to this project are documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.0] - 2026-07-03
+
+Makes the server consumable by an agent pipeline (triage, investigation, spec, review) and by a programmatic orchestrator, without breaking interactive use from Claude Code. Implements the internal "youtrack-mcp v0.3" cahier des charges. The headline is a structured-output contract on every tool plus the three tools the pipeline was missing: rich issue reads, in-place mutation, and attachment download.
+
+### Added
+
+- **Structured output on every tool (spec §0.2).** Every tool now returns a `structuredContent` block with a declared `outputSchema` (derived from a per-tool TypedDict in the new `youtrack_mcp/schemas.py`). The human-readable text stays the first content for LLM clients; the orchestrator reads only `structuredContent`. List-returning tools (`search_issues`, `list_projects`, `find_user`, `get_issue_comments`, ...) now return object envelopes (`{results/items, total/count}`) since `structuredContent` must be an object.
+- **Normalized error envelope (spec §0.3).** Any failure returns `{"error": {"code", "message", "youtrack_status?", "retryable"}}` in `structuredContent` instead of raising. Codes: `NOT_FOUND` (404), `PERMISSION_DENIED` (401/403), `VALIDATION_FAILED` (4xx / client-side validation), `RATE_LIMITED` (429), `YOUTRACK_UNAVAILABLE` (5xx / network). `RATE_LIMITED` and `YOUTRACK_UNAVAILABLE` are flagged `retryable` for the orchestrator's retry routing. A `@_structured` decorator wraps every tool so a raw Python exception can never leak into the response; the live token is redacted from messages. All-optional/nullable schemas mean the error envelope validates against the same schema as the success payload.
+- **`get_issue(issue_id, include_comments?, include_attachments?, max_comments?)` reworked (spec §1).** The rich read for triage/investigation: `id`+`id_readable`, `project{id,short_name}`, `reporter{login,name}`, flattened `custom_fields` (the exact shape `update_issue` accepts back), inline `comments` (with their attachment ids) and `attachments` metadata (`{id,name,mime_type,size_bytes,created,author,comment_id}`), all in one request. Description and comment bodies are truncated to 32 KB with a `truncated` flag so a pasted log dump can't blow up an agent's context.
+- **`download_attachment(issue_id, attachment_id, dest_path?, max_size_bytes?)` (spec §3).** THE investigation tool now that prod access is cut. Writes the attachment's bytes to disk (never returns them in the response), defaulting to `./attachments/{issue_id}/{name}`, and returns `{path, sha256, size_bytes, text_preview}` (first 2000 chars for text/* files) so the agent can decide whether to Read it. Refuses (`VALIDATION_FAILED`, with the real size) anything over `max_size_bytes` (default 10 MB) before downloading. The server-provided name is basename-sanitised against path traversal. A new `_request_raw` helper does the authenticated binary GET.
+- **`update_issue(issue_id, summary?, description?, custom_fields?, add_tags?, remove_tags?, create_missing_tags?)` reworked (spec §2).** The triage/routing path: set severity/chain/kind/priority/State/assignee in place. Enum/state values are fuzzy-matched (case-insensitive + synonyms, e.g. `State: "fixed"` → the project's `Done`); an unresolvable value returns `VALIDATION_FAILED` with a difflib "did you mean 'Critical'?" suggestion. `"__CLEAR__"` is the explicit clear-a-field sentinel. `add_tags` creates unknown tags when `create_missing_tags` is true; `remove_tags` detaches. Returns the `get_issue`-shaped projection plus `applied: {custom_fields, tags_added, tags_removed, warnings}`.
+- **`create_issue` gains `idempotency_key` (spec §0.4).** Before creating, the server searches for an issue tagged `idem:{key}`; if one exists it is returned with `idempotent_hit: true` and nothing new is created (guards against duplicate inbound webhooks). On create it stamps the `idem:{key}` tag. `create_issue`/`create_and_close_issue` now return the full issue object (`id, id_readable, summary, url, tags, custom_fields, idempotent_hit`).
+- **`add_comment` gains `attachments`** (spec §4.3): a list of local file paths uploaded alongside the comment (QA screenshots, investigation diagnostics), returning `{ok, issue_id, comment_id, created, attachments}`.
+- **`search_issues` gains `fields` and defaults `limit` to 20** (spec §4.1): `fields="minimal"` (id, summary, state, priority, tags, updated) or `"standard"` (adds description, assignee, reporter), returned as `{results, total}`.
+- **`.youtrack.yml` extensions (spec §5):** `create_missing_tags` (default true), a `defaults` block, and a `pipeline` section (`triage_tags`, `state_map`). `find_youtrack_config` returns the resolved path and the effective (post-defaults) values, and best-effort validates each `state_map` target against the project's live State field, reporting misses under `config.pipeline.state_map_warnings`.
+- **~50 new tests** across `tests/test_structured_v05.py` (error classification, idempotency, search/create/comment shapes, per-tool `structuredContent`-validates-schema via jsonschema), `tests/test_jsonrpc_stdio.py` (a real JSON-RPC-over-stdio client running `initialize` + `tools/list` and checking every advertised `outputSchema` is valid, spec §6.7), `tests/test_attachments.py` (rewritten for the §3 download + §1/§2 shapes), and config §5 cases. Full suite: 196 tests.
+
+### Changed
+
+- **List tools return envelopes, not bare lists.** Return-shape change for `list_projects`, `find_user`, `find_user_groups`, `get_user_group_members`, `get_saved_issue_searches`, `get_issue_comments`, `search_articles`, `search_issues` (all now `{items|results, count|total}`). Input signatures are unchanged (spec §0.1 backward-compat is on signatures).
+- Tool errors are now returned, not raised. Tests that asserted `pytest.raises` on a tool now assert the error envelope; helper-level validators (`_build_custom_fields_payload`, ...) still raise internally.
+- `manage_issue_tags` shares `_add_tags_impl`/`_remove_tags_impl` with `update_issue` and gained a `create_missing` argument.
+
+### Not in scope (per spec §7)
+
+Inbound webhooks/events (YouTrack workflow JS), attachment upload at issue creation (use `add_comment` attachments), streamable HTTP transport (stdio suffices), and inter-issue links for triage dedup (tags carry it).
+
 ## [0.4.1] - 2026-06-12
 
 ### Fixed

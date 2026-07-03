@@ -68,6 +68,18 @@ custom_fields: {}
 #   Type: "Bug"
 #   Assignee: "your.login"
 
+# OPTIONAL. When update_issue / manage_issue_tags is asked to add a tag that
+# doesn't exist yet, create it at the instance level instead of skipping it.
+# The value is passed through by the orchestrator as the tools' create_missing_tags
+# argument (the MCP server itself is stateless and does not read this file).
+# Default: true.
+create_missing_tags: true
+
+# OPTIONAL. Default custom-field values, applied by the orchestrator on triage
+# when a field is otherwise unset. Same shape/matching as `custom_fields` above.
+defaults: {}
+#   Type: "Bug"
+
 # OPTIONAL. Tags applied to every issue created from this project.
 default_tags: []
 #   - "claude-created"
@@ -97,3 +109,21 @@ evidence:
 #
 # For evidence posted by the CI pipeline itself (no Claude session), see the
 # examples/ci/ directory in the MCP server repo.
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Pipeline. Optional section consumed by the agent orchestrator; ignored by
+# normal interactive use of the skill.
+# ─────────────────────────────────────────────────────────────────────────────
+# The state_map lives HERE, in the repo, not in the orchestrator: every YouTrack
+# project names its States differently, and the MCP (which holds the live schema)
+# validates the mapping when find_youtrack_config loads this file, reporting any
+# unresolvable target under config.pipeline.state_map_warnings.
+pipeline:
+  # Tags the triage stage may apply (chain length + severity).
+  triage_tags: ["chain:SHORT", "chain:FULL", "sev:trivial", "sev:normal", "sev:critical"]
+  # Orchestrator state -> YouTrack State name (validated against the live schema).
+  state_map:
+    CODING: "In Progress"
+    HUMAN_REVIEW: "To Verify"
+    MERGED: "Fixed"
+    ESCALATED: "Open"

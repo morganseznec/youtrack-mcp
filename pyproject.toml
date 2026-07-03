@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "youtrack-mcp"
-version = "0.4.1"
+version = "0.5.0"
 description = "Model Context Protocol server for YouTrack. Create, update, link, comment, search, time-track, and close issues, plus projects, users, groups, and knowledge base articles, from Claude Code and other MCP clients."
 readme = "README.md"
 requires-python = ">=3.10"

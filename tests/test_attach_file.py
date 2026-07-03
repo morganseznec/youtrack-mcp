@@ -77,7 +77,8 @@ def test_attach_file_custom_name(monkeypatch, tmp_path):
     assert result["url"] == "https://abs/url"
 
 
-def test_attach_file_missing_file_raises(monkeypatch):
+def test_attach_file_missing_file_returns_error(monkeypatch):
     monkeypatch.setattr(server, "_send", lambda *a, **k: {})
-    with pytest.raises(server.YouTrackError, match="not a readable file"):
-        server.attach_file("IS-1", "/no/such/file.xyz")
+    result = server.attach_file("IS-1", "/no/such/file.xyz")
+    assert result["error"]["code"] == "VALIDATION_FAILED"
+    assert "not a readable file" in result["error"]["message"]

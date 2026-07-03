@@ -48,8 +48,8 @@ def _schema_with(*fields):
 
 def test_update_issue_sends_summary_and_custom_fields(monkeypatch):
     rec = _Recorder({
-        ("GET", "/issues/IS-1"): {"project": {"id": "0-1"}},
-        ("POST", "/issues/IS-1"): {"idReadable": "IS-1", "summary": "New title"},
+        ("GET", "/issues/IS-1"): {"idReadable": "IS-1", "project": {"id": "0-1"}},
+        ("POST", "/issues/IS-1"): {"idReadable": "IS-1"},
     })
     monkeypatch.setattr(server, "_request", rec)
     monkeypatch.setattr(server, "_get_project_schema_cached", _schema_with(
@@ -64,14 +64,32 @@ def test_update_issue_sends_summary_and_custom_fields(monkeypatch):
         {"name": "Priority", "$type": "SingleEnumIssueCustomField",
          "value": {"name": "Critical", "$type": "EnumBundleElement"}},
     ]
-    assert result == {"ok": True, "issue_id": "IS-1", "summary": "New title",
-                      "url": f"{server.YOUTRACK_URL}/issue/IS-1"}
+    # New shape: the get_issue-style projection plus an `applied` block.
+    assert result["id_readable"] == "IS-1"
+    assert result["url"] == f"{server.YOUTRACK_URL}/issue/IS-1"
+    assert result["applied"]["custom_fields"] == ["Priority"]
+    assert result["applied"]["warnings"] == []
+    assert "error" not in result
 
 
-def test_update_issue_nothing_to_update_raises(monkeypatch):
+def test_update_issue_bad_enum_value_returns_validation_error_with_suggestion(monkeypatch):
+    rec = _Recorder({("GET", "/issues/IS-1"): {"idReadable": "IS-1", "project": {"id": "0-1"}}})
+    monkeypatch.setattr(server, "_request", rec)
+    monkeypatch.setattr(server, "_get_project_schema_cached", _schema_with(
+        {"name": "Priority", "type": "enum[1]", "values": ["Critical", "Normal"]},
+    ))
+
+    result = server.update_issue("IS-1", custom_fields={"Priority": "Criticall"})
+
+    assert result["error"]["code"] == "VALIDATION_FAILED"
+    assert "Critical" in result["error"]["message"]
+
+
+def test_update_issue_nothing_to_update_returns_error(monkeypatch):
     monkeypatch.setattr(server, "_request", _Recorder())
-    with pytest.raises(server.YouTrackError, match="nothing to update"):
-        server.update_issue("IS-1")
+    result = server.update_issue("IS-1")
+    assert result["error"]["code"] == "VALIDATION_FAILED"
+    assert "nothing to update" in result["error"]["message"]
 
 
 # ─── change_issue_assignee ────────────────────────────────────────────────────
@@ -135,10 +153,11 @@ def test_link_issues_depends_on(monkeypatch):
     assert rec.body_for("POST", "/commands")["query"] == "depends on IS-3"
 
 
-def test_link_issues_unknown_type_raises(monkeypatch):
+def test_link_issues_unknown_type_returns_error(monkeypatch):
     monkeypatch.setattr(server, "_request", _Recorder())
-    with pytest.raises(server.YouTrackError, match="Unknown link type"):
-        server.link_issues("IS-1", "IS-2", "frobnicate")
+    result = server.link_issues("IS-1", "IS-2", "frobnicate")
+    assert result["error"]["code"] == "VALIDATION_FAILED"
+    assert "Unknown link type" in result["error"]["message"]
 
 
 # ─── manage_issue_tags ────────────────────────────────────────────────────────
@@ -209,10 +228,11 @@ def test_log_work_minutes_int(monkeypatch):
     assert rec.body_for("POST", "/issues/IS-1/timeTracking/workItems")["duration"] == {"minutes": 30}
 
 
-def test_log_work_requires_time(monkeypatch):
+def test_log_work_requires_time_returns_error(monkeypatch):
     monkeypatch.setattr(server, "_request", _Recorder())
-    with pytest.raises(server.YouTrackError, match="positive 'minutes'"):
-        server.log_work("IS-1")
+    result = server.log_work("IS-1")
+    assert result["error"]["code"] == "VALIDATION_FAILED"
+    assert "positive 'minutes'" in result["error"]["message"]
 
 
 # ─── get_issue (response flattening) ──────────────────────────────────────────
@@ -245,9 +265,9 @@ def test_get_issue_flattens_fields_tags_links(monkeypatch):
 
     result = server.get_issue("IS-1")
 
-    assert result["fields"] == {"State": "In Progress", "Assignee": "Bob R", "Priority": None}
-    assert result["reporter"] == "jane"
-    assert result["project"] == "IS"
+    assert result["custom_fields"] == {"State": "In Progress", "Assignee": "Bob R", "Priority": None}
+    assert result["reporter"] == {"login": "jane", "name": None}
+    assert result["project"] == {"id": None, "short_name": "IS"}
     assert result["created"] == "1970-01-01T00:00:00+00:00"
     assert result["is_resolved"] is False
     assert result["comments_count"] == 4
@@ -269,7 +289,10 @@ def test_find_user_filters_client_side_even_if_server_ignores_query(monkeypatch)
 
     result = server.find_user("jane")
 
-    assert result == [{"id": "1", "login": "jane.doe", "full_name": "Jane Doe", "email": "jane@x.io"}]
+    assert result == {
+        "items": [{"id": "1", "login": "jane.doe", "full_name": "Jane Doe", "email": "jane@x.io"}],
+        "count": 1,
+    }
 
 
 def test_search_articles_filters_by_title(monkeypatch):
@@ -281,4 +304,7 @@ def test_search_articles_filters_by_title(monkeypatch):
 
     result = server.search_articles("deploy")
 
-    assert result == [{"id": "IS-A-1", "summary": "Deploy runbook", "project": "IS"}]
+    assert result == {
+        "items": [{"id": "IS-A-1", "summary": "Deploy runbook", "project": "IS"}],
+        "count": 1,
+    }

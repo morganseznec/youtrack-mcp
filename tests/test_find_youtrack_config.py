@@ -58,7 +58,8 @@ def _write_config(tmp_path: Path, body: str) -> dict:
     (tmp_path / ".youtrack.yml").write_text(body, encoding="utf-8")
     result = server.find_youtrack_config(str(tmp_path))
     assert result["found"] is True, result
-    assert result["error"] is None, result
+    assert result.get("error") is None, result
+    assert result.get("parse_error") is None, result
     return result["config"]
 
 
@@ -122,3 +123,43 @@ def test_example_file_raw_parse_has_string_on_key():
     raw = yaml.safe_load(EXAMPLE_FILE.read_text(encoding="utf-8"))
     assert "on" in raw["evidence"]
     assert True not in raw["evidence"]
+
+
+# ─── §5 config extensions ────────────────────────────────────────────────────
+
+def test_defaults_expose_new_pipeline_keys(tmp_path):
+    config = _write_config(tmp_path, 'project_id: "0-1"\n')
+    assert config["create_missing_tags"] is True
+    assert config["defaults"] == {}
+    assert config["pipeline"]["triage_tags"] == []
+    assert config["pipeline"]["state_map"] == {}
+
+
+def test_pipeline_block_deep_merges(tmp_path):
+    config = _write_config(tmp_path, """
+project_id: "0-1"
+pipeline:
+  triage_tags: ["chain:FULL"]
+""")
+    # triage_tags overridden, state_map falls back to the default (not dropped).
+    assert config["pipeline"]["triage_tags"] == ["chain:FULL"]
+    assert config["pipeline"]["state_map"] == {}
+
+
+def test_state_map_validation_flags_unknown_state(tmp_path, monkeypatch):
+    # The MCP validates the repo's state_map against the project's live States.
+    monkeypatch.setattr(server, "_get_project_schema_cached", lambda pid: {
+        "project_id": pid,
+        "fields": [{"name": "State", "type": "state[1]", "values": ["To do", "In Progress", "Done"]}],
+    })
+    config = _write_config(tmp_path, """
+project_id: "0-1"
+pipeline:
+  state_map:
+    CODING: "In Progress"
+    MERGED: "Shipped"
+""")
+    warnings = config["pipeline"]["state_map_warnings"]
+    # CODING→"In Progress" resolves (no warning); MERGED→"Shipped" does not.
+    assert any(w.startswith("MERGED:") for w in warnings)
+    assert not any(w.startswith("CODING:") for w in warnings)
