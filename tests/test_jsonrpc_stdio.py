@@ -10,8 +10,11 @@ YouTrack); here we pin the transport + schema declaration end to end.
 
 import json
 import os
+import queue
 import subprocess
 import sys
+import threading
+import time
 from pathlib import Path
 
 import jsonschema
@@ -19,8 +22,13 @@ import jsonschema
 SRC = str(Path(__file__).resolve().parent.parent / "src")
 
 
-def _rpc_roundtrip():
-    """Drive one initialize → tools/list exchange over stdio, return the tools."""
+def _rpc_roundtrip(timeout=30):
+    """Drive one initialize → tools/list exchange over stdio, return the tools.
+
+    A background reader thread consumes stdout line by line so we can wait for the
+    specific tools/list response (id 2) before shutting the server down. Relying on
+    stdin-EOF to flush would race the in-flight response against cancellation.
+    """
     env = {
         **os.environ,
         "YOUTRACK_URL": "https://test.invalid",
@@ -34,7 +42,19 @@ def _rpc_roundtrip():
         stderr=subprocess.PIPE,
         env=env,
         text=True,
+        bufsize=1,
     )
+
+    lines: "queue.Queue[str | None]" = queue.Queue()
+
+    def _reader():
+        for line in proc.stdout:
+            lines.put(line)
+        lines.put(None)
+
+    reader = threading.Thread(target=_reader, daemon=True)
+    reader.start()
+
     messages = [
         {"jsonrpc": "2.0", "id": 1, "method": "initialize",
          "params": {"protocolVersion": "2024-11-05", "capabilities": {},
@@ -42,23 +62,39 @@ def _rpc_roundtrip():
         {"jsonrpc": "2.0", "method": "notifications/initialized"},
         {"jsonrpc": "2.0", "id": 2, "method": "tools/list"},
     ]
-    payload = "".join(json.dumps(m) + "\n" for m in messages)
-    # Closing stdin lets the server drain the queued messages then exit cleanly.
-    out, err = proc.communicate(input=payload, timeout=30)
+    proc.stdin.write("".join(json.dumps(m) + "\n" for m in messages))
+    proc.stdin.flush()
 
-    responses = []
-    for line in out.splitlines():
-        line = line.strip()
-        if not line:
-            continue
+    tools = None
+    deadline = time.monotonic() + timeout
+    try:
+        while time.monotonic() < deadline:
+            try:
+                line = lines.get(timeout=max(0.05, deadline - time.monotonic()))
+            except queue.Empty:
+                break
+            if line is None:
+                break
+            try:
+                msg = json.loads(line.strip())
+            except json.JSONDecodeError:
+                continue
+            if msg.get("id") == 2 and "result" in msg:
+                tools = msg["result"]["tools"]
+                break
+    finally:
         try:
-            responses.append(json.loads(line))
-        except json.JSONDecodeError:
-            continue
-    tools_resp = next((r for r in responses if r.get("id") == 2), None)
-    assert tools_resp is not None, f"no tools/list response.\nSTDOUT:{out}\nSTDERR:{err}"
-    assert "result" in tools_resp, tools_resp
-    return tools_resp["result"]["tools"]
+            proc.stdin.close()
+        except OSError:
+            pass
+        proc.terminate()
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+
+    assert tools is not None, "no tools/list response received over stdio"
+    return tools
 
 
 def test_stdio_tools_list_declares_valid_output_schemas():
