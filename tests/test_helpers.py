@@ -1,7 +1,7 @@
 """Unit tests for the pure helpers in `youtrack_mcp.server`.
 
 Covers normalization, fuzzy matching, close-state resolution, and the token
-redaction helper. No network, no FastMCP machinery touched.
+redaction helper. No network, no MCPServer machinery touched.
 """
 
 import pytest

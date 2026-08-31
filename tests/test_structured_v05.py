@@ -18,15 +18,15 @@ _TOOLS = {t.name: t for t in server.mcp._tool_manager.list_tools()}
 
 
 def _run_tool(name, arguments):
-    """Invoke a tool through FastMCP's conversion and return (structured, schema).
+    """Invoke a tool through MCPServer's conversion and return (structured, schema).
 
-    Going through convert_result mirrors what the stdio server sends on the wire:
+    Going through call_tool mirrors what the stdio server sends on the wire:
     the returned structuredContent is exactly what the orchestrator receives.
     """
-    tool = _TOOLS[name]
-    result = asyncio.run(tool.run(arguments, convert_result=True))
-    assert isinstance(result, tuple), f"{name} produced no structuredContent"
-    return result[1], tool.output_schema
+    result = asyncio.run(server.mcp.call_tool(name, arguments))
+    structured = result.structured_content
+    assert structured is not None, f"{name} produced no structuredContent"
+    return structured, _TOOLS[name].output_schema
 
 
 # ─── §6.6 error classification ────────────────────────────────────────────────
