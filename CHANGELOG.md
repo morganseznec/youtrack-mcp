@@ -4,6 +4,21 @@ All notable changes to this project are documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.0] - 2026-08-31
+
+Migration to MCP Python SDK 2.x. No change to the tool surface, input signatures, structured-output contract, or wire behavior; existing clients (Claude Code included) reconnect as before.
+
+### Fixed
+
+- **Fresh installs crashed at startup.** The dependency was declared as `mcp[cli]>=1.2.0` with no upper bound; since SDK v2.0.0 (2026-07-28), `pip install mcp` resolves to 2.x, where `FastMCP` was renamed to `MCPServer` and the `mcp.server.fastmcp` module was removed. Any environment resolving dependencies today (the recommended `uvx --from git+...` install does so on first run or refresh) died at import with `ModuleNotFoundError: No module named 'mcp.server.fastmcp'`. Already-cached uvx environments kept working, which masked the breakage.
+
+### Changed
+
+- **Now requires MCP Python SDK 2.x (`mcp[cli]>=2,<3`).** The server imports `MCPServer` from `mcp.server.mcpserver`. The decorator API and the dict-return-to-`structuredContent` conversion are unchanged in v2, so no tool code changed. SDK v1 is in maintenance mode (security fixes only) and is no longer supported here; v2 still serves 2025-era protocol clients from the same server, verified end to end by the JSON-RPC stdio test speaking `2024-11-05`.
+- **`serverInfo.version` now reports the server's real version** (`0.6.0`). mcp 2.x reports an empty version unless the server declares one (v1 reported the SDK's own version, which was wrong anyway), so the server now passes `version=__version__`. `__init__.__version__` had drifted (stuck at 0.4.1 while `pyproject.toml` said 0.5.0); it is resynced and is what goes over the wire.
+- **Synchronous tool handlers now run on worker threads** (SDK v2 behavior): a blocking YouTrack HTTP call no longer stalls other in-flight requests, and tools may run concurrently. The only shared mutable state, the project-schema cache, was already guarded by a `threading.Lock`, so this is safe.
+- `tests/test_structured_v05.py` invokes tools through the public `MCPServer.call_tool()` (which returns a `CallToolResult` in v2) instead of the internal `Tool.run(convert_result=True)` tuple contract. Full suite: 196 tests, all passing under mcp 2.1.1.
+
 ## [0.5.0] - 2026-07-03
 
 Makes the server consumable by an agent pipeline (triage, investigation, spec, review) and by a programmatic orchestrator, without breaking interactive use from Claude Code. Implements the internal "youtrack-mcp v0.3" cahier des charges. The headline is a structured-output contract on every tool plus the three tools the pipeline was missing: rich issue reads, in-place mutation, and attachment download.

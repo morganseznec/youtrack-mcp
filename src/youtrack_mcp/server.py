@@ -29,8 +29,9 @@ from threading import Lock
 from typing import Any
 
 import yaml
-from mcp.server.fastmcp import FastMCP
+from mcp.server.mcpserver import MCPServer
 
+from . import __version__
 from .schemas import (
     ArticleDetail,
     ArticleList,
@@ -111,7 +112,8 @@ if not YOUTRACK_URL or not YOUTRACK_TOKEN:
         "Provide a token via YOUTRACK_TOKEN, YOUTRACK_TOKEN_FILE, or YOUTRACK_TOKEN_CMD."
     )
 
-mcp = FastMCP("youtrack")
+# mcp 2.x reports an empty serverInfo.version unless the server declares its own.
+mcp = MCPServer("youtrack", version=__version__)
 
 
 class YouTrackError(Exception):
@@ -187,7 +189,7 @@ def _structured(fn):
     """Wrap a tool so any failure becomes a normalized error envelope.
 
     Applied UNDER @mcp.tool(): functools.wraps preserves the signature and the
-    return annotation, so FastMCP still derives the input/output schema from the
+    return annotation, so MCPServer still derives the input/output schema from the
     original function. The wrapper guarantees a tool never raises a raw exception
     into the MCP response; it returns {"error": {...}} instead, which validates
     against every tool's (all-optional) output schema.
@@ -704,7 +706,7 @@ def _create_issue_impl(
     idempotency_key: str | None = None,
 ) -> dict[str, Any]:
     """Plain-Python implementation. Called by the @mcp.tool wrapper below and by
-    create_and_close_issue, so that the latter doesn't depend on FastMCP internals.
+    create_and_close_issue, so that the latter doesn't depend on MCPServer internals.
     """
     pid = project_id or YOUTRACK_DEFAULT_PROJECT_ID
     if not pid:

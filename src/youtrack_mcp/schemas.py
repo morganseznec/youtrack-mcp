@@ -1,11 +1,11 @@
 """Canonical output shapes for every MCP tool (spec §0.2).
 
-Each tool annotates its return type with one of these TypedDicts. FastMCP derives
+Each tool annotates its return type with one of these TypedDicts. MCPServer derives
 a rich JSON `outputSchema` from the annotation and emits the returned dict as the
 tool's `structuredContent`, which a programmatic client reads and validates.
 
 Every field is optional (`total=False`) AND nullable (`| None`), for two reasons:
-  1. FastMCP null-fills any field the tool omits before dumping structuredContent,
+  1. MCPServer null-fills any field the tool omits before dumping structuredContent,
      so an omitted field must be allowed to be null by the schema.
   2. The normalized error envelope {"error": {...}} omits every success field, so
      on failure they are all null; the error object itself must validate too.

@@ -190,6 +190,7 @@ The MCP exposes 28 tools. They are prefixed `mcp__youtrack__` in Claude Code too
 ## Requirements
 
 - Python 3.10+
+- MCP Python SDK 2.x (installed automatically; since v0.6.0 the server targets `mcp>=2,<3`)
 - [`uv`](https://github.com/astral-sh/uv) for the recommended install path
 - A YouTrack instance with a permanent token
 
