@@ -295,12 +295,66 @@ def test_find_user_filters_client_side_even_if_server_ignores_query(monkeypatch)
     }
 
 
-def test_search_articles_filters_by_title(monkeypatch):
+def test_find_user_me_returns_the_current_user(monkeypatch):
+    # "me" is not a substring to look for: it names the token owner.
+    rec = _Recorder({
+        ("GET", "/users/me"): {"id": "1-1", "login": "admin", "fullName": "Morgan", "email": "it@x.io"},
+        ("GET", "/users"): [{"id": "1-9", "login": "james", "fullName": "James", "email": "j@x.io"}],
+    })
+    monkeypatch.setattr(server, "_request", rec)
+
+    result = server.find_user("Me")
+
+    assert result == {
+        "items": [{"id": "1-1", "login": "admin", "full_name": "Morgan", "email": "it@x.io"}],
+        "count": 1,
+    }
+    assert [c["path"] for c in rec.calls] == ["/users/me"]
+
+
+def test_find_user_lists_exact_login_first(monkeypatch):
+    users = [
+        {"id": "1", "login": "bob.admin", "fullName": "Bob", "email": "bob@x.io"},
+        {"id": "2", "login": "admin", "fullName": "Morgan", "email": "it@x.io"},
+    ]
+    monkeypatch.setattr(server, "_request", _Recorder({("GET", "/users"): users}))
+
+    result = server.find_user("admin")
+
+    assert [u["login"] for u in result["items"]] == ["admin", "bob.admin"]
+
+
+def test_search_articles_keeps_server_full_text_matches(monkeypatch):
+    # YouTrack matched on content (and on filters like `project: IS`): the titles
+    # don't contain the query, and the results must survive anyway.
+    articles = [
+        {"idReadable": "IS-A-2", "summary": "DR 1: loss of availability zone", "project": {"name": "IS"}},
+    ]
+    rec = _Recorder({("GET", "/articles"): articles})
+    monkeypatch.setattr(server, "_request", rec)
+
+    result = server.search_articles("Prometheus", limit=5)
+
+    assert result == {
+        "items": [{"id": "IS-A-2", "summary": "DR 1: loss of availability zone", "project": "IS"}],
+        "count": 1,
+    }
+    assert rec.calls[0]["params"]["query"] == "Prometheus"
+    assert rec.calls[0]["params"]["$top"] == "5"
+
+
+def test_search_articles_falls_back_to_titles_when_query_rejected(monkeypatch):
     articles = [
         {"idReadable": "IS-A-1", "summary": "Deploy runbook", "project": {"name": "IS"}},
         {"idReadable": "IS-A-2", "summary": "Onboarding", "project": {"name": "IS"}},
     ]
-    monkeypatch.setattr(server, "_request", _Recorder({("GET", "/articles"): articles}))
+
+    def _articles(body, params):
+        if "query" in params:
+            raise server.YouTrackHTTPError("HTTP 400 invalid_query", status=400)
+        return articles
+
+    monkeypatch.setattr(server, "_request", _Recorder({("GET", "/articles"): _articles}))
 
     result = server.search_articles("deploy")
 
@@ -308,3 +362,45 @@ def test_search_articles_filters_by_title(monkeypatch):
         "items": [{"id": "IS-A-1", "summary": "Deploy runbook", "project": "IS"}],
         "count": 1,
     }
+
+
+# ─── create_draft_issue endpoint ──────────────────────────────────────────────
+
+_DRAFT = {"id": "68-1", "idReadable": "Issue.Draft", "summary": "Draft"}
+
+
+def test_create_draft_issue_posts_to_users_me_drafts(monkeypatch):
+    rec = _Recorder({("POST", "/users/me/drafts"): _DRAFT})
+    monkeypatch.setattr(server, "_request", rec)
+
+    result = server.create_draft_issue("Draft", project_id="0-19")
+
+    assert result["id"] == "68-1" and result["draft"] is True
+    assert [c["path"] for c in rec.calls] == ["/users/me/drafts"]
+    assert rec.body_for("POST", "/users/me/drafts")["project"] == {"id": "0-19"}
+
+
+def test_create_draft_issue_falls_back_to_admin_path_on_404(monkeypatch):
+    def _gone(body, params):
+        raise server.YouTrackHTTPError("HTTP 404", status=404)
+
+    rec = _Recorder({("POST", "/users/me/drafts"): _gone, ("POST", "/admin/users/me/drafts"): _DRAFT})
+    monkeypatch.setattr(server, "_request", rec)
+
+    result = server.create_draft_issue("Draft", project_id="0-19")
+
+    assert result["id"] == "68-1"
+    assert [c["path"] for c in rec.calls] == ["/users/me/drafts", "/admin/users/me/drafts"]
+
+
+def test_create_draft_issue_reports_a_non_404_error(monkeypatch):
+    def _denied(body, params):
+        raise server.YouTrackHTTPError("HTTP 403", status=403)
+
+    rec = _Recorder({("POST", "/users/me/drafts"): _denied})
+    monkeypatch.setattr(server, "_request", rec)
+
+    result = server.create_draft_issue("Draft", project_id="0-19")
+
+    assert result["error"]["code"] == "PERMISSION_DENIED"
+    assert len(rec.calls) == 1

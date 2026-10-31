@@ -135,7 +135,7 @@ The guiding principle: evidence should be **verifiable and attributed**, not ass
 
 The MCP exposes 28 tools. They are prefixed `mcp__youtrack__` in Claude Code tool calls.
 
-**Structured output.** Every tool returns a `structuredContent` block with a declared `outputSchema` (a programmatic client reads only that; the readable text stays for LLM clients). Failures return `{"error": {"code", "message", "youtrack_status?", "retryable"}}` in `structuredContent` instead of raising, with codes `NOT_FOUND` / `PERMISSION_DENIED` / `VALIDATION_FAILED` / `RATE_LIMITED` / `YOUTRACK_UNAVAILABLE` (the last two `retryable`). List tools return `{items, count}` (or `{results, total}` for `search_issues`).
+**Structured output.** Every tool returns a `structuredContent` block with a declared `outputSchema` (a programmatic client reads only that; the readable text stays for LLM clients). Failures return `{"error": {"code", "message", "youtrack_status?", "retryable"}}` in `structuredContent` instead of raising, and the result carries `isError: true`. Codes: `NOT_FOUND` / `PERMISSION_DENIED` / `VALIDATION_FAILED` / `RATE_LIMITED` / `YOUTRACK_UNAVAILABLE` / `INTERNAL_ERROR`. `RATE_LIMITED` and `YOUTRACK_UNAVAILABLE` are `retryable`, except a write whose reply was lost after it reached YouTrack (it may have been applied). `INTERNAL_ERROR` is a bug in this server and is never retryable. List tools return `{items, count}` (or `{results, total, has_more, next_offset}` for `search_issues`).
 
 **Issues**
 
@@ -155,7 +155,7 @@ The MCP exposes 28 tools. They are prefixed `mcp__youtrack__` in Claude Code too
 | `log_work(issue_id, minutes?, duration?, text?, date?, work_type?)` | Log time. Accepts `minutes` or a `"1h 30m"` string |
 | `close_issue(issue_id, comment?, state?)` | Close. `state=None` auto-picks the project's canonical "done" state |
 | `create_and_close_issue(summary, ..., closing_comment?, state?)` | One-shot for after-the-fact tracking |
-| `search_issues(query, limit?, offset?, fields?)` | YouTrack query syntax; `fields` = `"minimal"`/`"standard"`. Returns `{results, total}`. The `project:` operator expects the SHORT NAME (e.g. `IS`) |
+| `search_issues(query, limit?, offset?, fields?)` | YouTrack query syntax; `fields` = `"minimal"`/`"standard"`. Returns `{results, total, has_more, next_offset}`, where `total` counts every match across all pages. The `project:` operator expects the SHORT NAME (e.g. `IS`) |
 | `get_saved_issue_searches()` | List the current user's saved searches |
 
 **Knowledge base articles**
@@ -165,7 +165,7 @@ The MCP exposes 28 tools. They are prefixed `mcp__youtrack__` in Claude Code too
 | `create_article(summary, content?, project_id?, parent_article_id?)` | Create an article, optionally nested under a parent |
 | `get_article(article_id)` | Article content plus parent and child articles |
 | `update_article(article_id, summary?, content?, parent_article_id?)` | Update title, content, and/or parent |
-| `search_articles(query, limit?)` | Title substring search (YouTrack has no full-text article query) |
+| `search_articles(query, limit?)` | Full-text search over titles and content, with YouTrack filters such as `project: IS` |
 
 **Projects, users, groups**
 
@@ -174,7 +174,7 @@ The MCP exposes 28 tools. They are prefixed `mcp__youtrack__` in Claude Code too
 | `list_projects()` | Discover project IDs |
 | `get_project(project_id)` | Project details: name, short name, description, leader, archived |
 | `get_project_fields(project_id)` | Inspect custom fields and allowed values |
-| `find_user(query, limit?)` | Find users by login / full name / email |
+| `find_user(query, limit?)` | Find users by login / full name / email (exact login or email first). `me` returns the token owner |
 | `get_current_user()` | The authenticated token owner |
 | `find_user_groups(query?, limit?)` | Find user groups by name |
 | `get_user_group_members(group_id, limit?, offset?)` | List a group's members |

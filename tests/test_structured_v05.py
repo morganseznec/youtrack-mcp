@@ -77,8 +77,63 @@ def test_unexpected_python_error_never_leaks_raw(monkeypatch):
 
     monkeypatch.setattr(server, "_request", boom)
     out = server.get_issue("PROJ-1")
-    # A bare exception is wrapped, not raised.
-    assert "error" in out and out["error"]["code"] == "YOUTRACK_UNAVAILABLE"
+    # A bare exception is wrapped, not raised, and is not presented as an outage
+    # an orchestrator should retry: the same input hits the same bug.
+    assert "error" in out and out["error"]["code"] == "INTERNAL_ERROR"
+    assert out["error"]["retryable"] is False
+
+
+def _urlopen_raising(exc):
+    def _urlopen(req, timeout=None):
+        raise exc
+    return _urlopen
+
+
+def test_post_timeout_after_send_is_not_retryable(monkeypatch):
+    # A reply that never comes back: the comment may exist, so a retry could
+    # post it twice.
+    monkeypatch.setattr(server.urllib.request, "urlopen", _urlopen_raising(TimeoutError("timed out")))
+    out = server.add_comment("PROJ-1", "hello")
+    assert out["error"]["code"] == "YOUTRACK_UNAVAILABLE"
+    assert out["error"]["retryable"] is False
+    assert "may have been applied" in out["error"]["message"]
+
+
+def test_get_timeout_after_send_is_retryable(monkeypatch):
+    monkeypatch.setattr(server.urllib.request, "urlopen", _urlopen_raising(TimeoutError("timed out")))
+    out = server.get_issue("PROJ-1")
+    assert out["error"]["code"] == "YOUTRACK_UNAVAILABLE"
+    assert out["error"]["retryable"] is True
+
+
+def test_post_connect_failure_is_retryable(monkeypatch):
+    # urlopen wraps connect/send failures in URLError: nothing reached YouTrack.
+    monkeypatch.setattr(
+        server.urllib.request, "urlopen",
+        _urlopen_raising(server.urllib.error.URLError(ConnectionRefusedError("refused"))),
+    )
+    out = server.add_comment("PROJ-1", "hello")
+    assert out["error"]["code"] == "YOUTRACK_UNAVAILABLE"
+    assert out["error"]["retryable"] is True
+
+
+def test_error_envelope_goes_out_with_is_error(monkeypatch):
+    def boom(*a, **k):
+        raise server.YouTrackHTTPError("HTTP 404 ...", status=404)
+
+    monkeypatch.setattr(server, "_request", boom)
+    result = asyncio.run(server.mcp.call_tool("get_issue", {"issue_id": "PROJ-999"}))
+    assert result.is_error is True
+    assert result.structured_content["error"]["code"] == "NOT_FOUND"
+
+
+def test_success_goes_out_without_is_error(monkeypatch):
+    monkeypatch.setattr(server, "_request", lambda *a, **k: {
+        "id": "2-1", "idReadable": "PROJ-1", "summary": "S",
+        "customFields": [], "comments": [], "attachments": [], "tags": [],
+    })
+    result = asyncio.run(server.mcp.call_tool("get_issue", {"issue_id": "PROJ-1"}))
+    assert result.is_error is False
 
 
 def test_token_is_redacted_from_error_messages(monkeypatch):
@@ -167,6 +222,69 @@ def test_search_standard_adds_description_and_assignee(monkeypatch):
     assert item["description"] == "detail"
     assert item["assignee"] == "Bob"
     assert item["reporter"] == "jane"
+
+
+class _SearchStub:
+    """_request stub: GET /issues returns `rows`, the count endpoint replies in turn."""
+
+    def __init__(self, rows, counts):
+        self.rows = rows
+        self.counts = list(counts)
+        self.calls = []
+
+    def __call__(self, method, path, body=None, params=None):
+        self.calls.append((method, path, params))
+        if path == "/issues":
+            return self.rows
+        if path == "/issuesGetter/count":
+            nxt = self.counts.pop(0)
+            if isinstance(nxt, Exception):
+                raise nxt
+            return {"count": nxt}
+        return {}
+
+
+def _rows(n):
+    return [{"idReadable": f"IS-{i}", "summary": "s"} for i in range(n)]
+
+
+def test_search_total_counts_all_pages_not_the_page(monkeypatch):
+    # limit=2 and YouTrack returns the extra probe row: more pages exist, so the
+    # total comes from the count endpoint (which answers -1 until it's ready).
+    stub = _SearchStub(_rows(3), counts=[-1, 781])
+    monkeypatch.setattr(server, "_request", stub)
+    monkeypatch.setattr(server.time, "sleep", lambda s: None)
+
+    out = server.search_issues("project: IS #Unresolved", limit=2)
+
+    assert [r["id_readable"] for r in out["results"]] == ["IS-0", "IS-1"]
+    assert out["total"] == 781
+    assert out["has_more"] is True
+    assert out["next_offset"] == 2
+    assert stub.calls[0][2]["$top"] == "3"
+
+
+def test_search_last_page_total_needs_no_count_call(monkeypatch):
+    stub = _SearchStub(_rows(2), counts=[])
+    monkeypatch.setattr(server, "_request", stub)
+
+    out = server.search_issues("project: IS", limit=20, offset=40)
+
+    assert out["total"] == 42
+    assert out["has_more"] is False
+    assert out["next_offset"] is None
+    assert [c[1] for c in stub.calls] == ["/issues"]
+
+
+def test_search_total_is_null_when_count_fails(monkeypatch):
+    stub = _SearchStub(_rows(3), counts=[server.YouTrackHTTPError("HTTP 500", status=500)])
+    monkeypatch.setattr(server, "_request", stub)
+
+    out = server.search_issues("project: IS", limit=2)
+
+    assert "error" not in out
+    assert out["total"] is None
+    assert out["has_more"] is True
 
 
 # ─── §4.3 add_comment with attachments ────────────────────────────────────────

@@ -11,6 +11,7 @@ Env vars (read at startup):
 import difflib
 import functools
 import hashlib
+import http.client
 import json
 import mimetypes
 import os
@@ -30,6 +31,7 @@ from typing import Any
 
 import yaml
 from mcp.server.mcpserver import MCPServer
+from mcp.types import CallToolResult
 
 from . import __version__
 from .schemas import (
@@ -112,8 +114,29 @@ if not YOUTRACK_URL or not YOUTRACK_TOKEN:
         "Provide a token via YOUTRACK_TOKEN, YOUTRACK_TOKEN_FILE, or YOUTRACK_TOKEN_CMD."
     )
 
+class _YouTrackMCPServer(MCPServer):
+    """MCPServer that flags our error envelopes as tool errors on the wire.
+
+    Tools return {"error": {...}} as structuredContent instead of raising, so an
+    orchestrator gets a routable code; the MCP spec also wants such a result
+    marked isError: true. Done here rather than in _structured so that calling
+    a tool function directly from Python still returns the plain dict.
+    """
+
+    async def call_tool(self, name: str, arguments: dict[str, Any], context: Any = None) -> Any:
+        result = await super().call_tool(name, arguments, context)
+        if (
+            isinstance(result, CallToolResult)
+            and not result.is_error
+            and isinstance(result.structured_content, dict)
+            and result.structured_content.get("error")
+        ):
+            return result.model_copy(update={"is_error": True})
+        return result
+
+
 # mcp 2.x reports an empty serverInfo.version unless the server declares its own.
-mcp = MCPServer("youtrack", version=__version__)
+mcp = _YouTrackMCPServer("youtrack", version=__version__)
 
 
 class YouTrackError(Exception):
@@ -134,7 +157,16 @@ class YouTrackHTTPError(YouTrackError):
 
 
 class YouTrackNetworkError(YouTrackError):
-    """A transport-level failure (DNS, connection refused, timeout): retryable."""
+    """A transport-level failure (DNS, connection refused, timeout).
+
+    retryable is False when the request may already have reached YouTrack and is
+    not safe to repeat (a POST that timed out waiting for the reply): retrying it
+    could create a second issue or comment.
+    """
+
+    def __init__(self, message: str, retryable: bool = True):
+        super().__init__(message)
+        self.retryable = retryable
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -143,8 +175,10 @@ class YouTrackNetworkError(YouTrackError):
 #
 # Every @mcp.tool returns structuredContent. On failure that content is
 # {"error": {"code", "message", "youtrack_status"?}} with a stable, orchestrator-
-# routable code. RATE_LIMITED and YOUTRACK_UNAVAILABLE are retryable; the rest
-# are not.
+# routable code, and the result goes out with isError: true. RATE_LIMITED and
+# YOUTRACK_UNAVAILABLE are retryable, except a network failure on a write that
+# was already sent (see YouTrackNetworkError); the rest, INTERNAL_ERROR (a bug in
+# this server) included, are not.
 _RETRYABLE_ERROR_CODES = frozenset({"RATE_LIMITED", "YOUTRACK_UNAVAILABLE"})
 
 
@@ -169,16 +203,21 @@ def _classify_error(exc: Exception) -> tuple[str, int | None]:
         return "VALIDATION_FAILED", None
     # An unexpected Python error: surface it as a structured, non-fatal envelope
     # rather than letting a raw traceback escape into the MCP response (spec §6.6).
-    return "YOUTRACK_UNAVAILABLE", None
+    # Not retryable: the same input hits the same bug, and a write may have
+    # landed before it was raised.
+    return "INTERNAL_ERROR", None
 
 
 def _error_payload(exc: Exception) -> dict[str, Any]:
     """Build the {"error": {...}} envelope for a failed tool call."""
     code, status = _classify_error(exc)
+    retryable = code in _RETRYABLE_ERROR_CODES
+    if isinstance(exc, YouTrackNetworkError):
+        retryable = exc.retryable
     err: ErrorObj = {
         "code": code,
         "message": _redact(str(exc)),
-        "retryable": code in _RETRYABLE_ERROR_CODES,
+        "retryable": retryable,
     }
     if status is not None:
         err["youtrack_status"] = status
@@ -228,7 +267,19 @@ def _send(req: urllib.request.Request, method: str, path: str, timeout: int = 15
         detail = _redact(e.read().decode("utf-8", errors="replace"))
         raise YouTrackHTTPError(f"HTTP {e.code} on {method} {path}: {detail}", status=e.code) from None
     except urllib.error.URLError as e:
+        # urlopen wraps what fails while connecting or sending, so YouTrack never
+        # got a complete request: safe to retry whatever the method.
         raise YouTrackNetworkError(f"network error on {method} {path}: {e.reason}") from None
+    except (OSError, http.client.HTTPException) as e:
+        # Raised while waiting for or reading the reply (timeout, reset): the
+        # request was delivered and a write may already have been applied.
+        if method in ("GET", "DELETE"):
+            raise YouTrackNetworkError(f"network error on {method} {path}: {e}") from None
+        raise YouTrackNetworkError(
+            f"network error on {method} {path} after the request was sent ({e}); "
+            "it may have been applied, check before retrying",
+            retryable=False,
+        ) from None
     except json.JSONDecodeError as e:
         raise YouTrackError(f"invalid JSON in response from {method} {path}: {e}") from None
 
@@ -319,6 +370,8 @@ def _request_raw(relative_url: str, timeout: int = 60) -> tuple[bytes, str]:
         raise YouTrackHTTPError(f"HTTP {e.code} downloading attachment: {detail}", status=e.code) from None
     except urllib.error.URLError as e:
         raise YouTrackNetworkError(f"network error downloading attachment: {e.reason}") from None
+    except (OSError, http.client.HTTPException) as e:
+        raise YouTrackNetworkError(f"network error downloading attachment: {e}") from None
 
 
 def _issue_url(id_readable: str) -> str:
@@ -974,6 +1027,27 @@ def _search_item(item: dict, standard: bool) -> dict:
     return out
 
 
+def _count_issues(query: str) -> int | None:
+    """Number of issues matching `query`, or None when YouTrack doesn't say.
+
+    YouTrack counts asynchronously: the endpoint answers -1 until the count is
+    ready, usually on the second try. Best effort: a failure here must not fail
+    the search that asked for it.
+    """
+    for delay in (0, 0.2, 0.4, 0.8):
+        time.sleep(delay)
+        try:
+            res = _request(
+                "POST", "/issuesGetter/count", body={"query": query}, params={"fields": "count"}
+            )
+        except YouTrackError:
+            return None
+        count = res.get("count") if isinstance(res, dict) else None
+        if isinstance(count, int) and count >= 0:
+            return count
+    return None
+
+
 @mcp.tool()
 @_structured
 def search_issues(
@@ -998,7 +1072,10 @@ def search_issues(
         fields: "minimal" (id, id_readable, summary, state, priority, tags,
             updated, url) or "standard" (adds description, assignee, reporter).
 
-    Returns: {results: [...], total} where each result is a lightweight issue.
+    Returns: {results: [...], total, has_more, next_offset} where each result is
+    a lightweight issue, `total` counts every match across all pages (null if
+    YouTrack could not count them), and `next_offset` is the offset of the next
+    page (null on the last one).
 
     Examples:
         "project: IS #Unresolved"
@@ -1008,7 +1085,8 @@ def search_issues(
     standard = fields == "standard"
     params = {
         "query": query,
-        "$top": str(limit),
+        # One row past the page tells whether a next page exists.
+        "$top": str(limit + 1),
         "$skip": str(offset),
         "fields": _SEARCH_FIELDS_STANDARD if standard else _SEARCH_FIELDS_MINIMAL,
     }
@@ -1017,8 +1095,20 @@ def search_issues(
         raise YouTrackError(
             f"Unexpected search_issues response shape: {type(result).__name__}"
         )
-    items = [_search_item(item, standard) for item in result if isinstance(item, dict)]
-    return {"results": items, "total": len(items)}
+    rows = [item for item in result if isinstance(item, dict)]
+    has_more = len(rows) > limit
+    items = [_search_item(item, standard) for item in rows[:limit]]
+    if not has_more and (items or offset == 0):
+        # Last page: the total follows from what we already have.
+        total: int | None = offset + len(items)
+    else:
+        total = _count_issues(query)
+    return {
+        "results": items,
+        "total": total,
+        "has_more": has_more,
+        "next_offset": offset + len(items) if has_more else None,
+    }
 
 
 def _restore_evidence_on_key(evidence: dict) -> dict:
@@ -1841,6 +1931,12 @@ def change_issue_assignee(issue_id: str, assignee: str | None = None) -> OkResul
     }
 
 
+# Current builds serve drafts under /users/me (the /admin path answers 404 on
+# YouTrack Cloud 2026.2); the /admin path is kept as a fallback for older Server
+# installs.
+_DRAFTS_PATHS = ("/users/me/drafts", "/admin/users/me/drafts")
+
+
 @mcp.tool()
 @_structured
 def create_draft_issue(
@@ -1854,7 +1950,7 @@ def create_draft_issue(
 
     Drafts are a private staging area. To create a real, visible issue, use
     create_issue instead. Note: the drafts endpoint is a semi-public YouTrack API
-    and may change between releases.
+    and has moved between releases (see _DRAFTS_PATHS).
 
     Args:
         summary: Draft title.
@@ -1866,12 +1962,15 @@ def create_draft_issue(
     pid = project_id or YOUTRACK_DEFAULT_PROJECT_ID
     if not pid:
         raise YouTrackError("project_id is required (no default configured)")
-    result = _request(
-        "POST",
-        "/admin/users/me/drafts",
-        body={"project": {"id": pid}, "summary": summary, "description": description},
-        params={"fields": "id,idReadable,summary"},
-    )
+    body = {"project": {"id": pid}, "summary": summary, "description": description}
+    params = {"fields": "id,idReadable,summary"}
+    for i, path in enumerate(_DRAFTS_PATHS):
+        try:
+            result = _request("POST", path, body=body, params=params)
+            break
+        except YouTrackHTTPError as e:
+            if e.status != 404 or i == len(_DRAFTS_PATHS) - 1:
+                raise
     if not isinstance(result, dict):
         raise YouTrackError(f"Unexpected create_draft_issue response shape: {type(result).__name__}")
     return {
@@ -2340,7 +2439,9 @@ def find_user(query: str, limit: int = 20) -> UserList:
     YouTrack permissions required: Read User (basic).
 
     Args:
-        query: Text to match against login / full name / email.
+        query: Text to match against login / full name / email. `me` returns
+            the current user (the token owner). An exact login or email match
+            is listed first.
         limit: Max users to return.
 
     Returns: {items: [{id, login, full_name, email}], count}.
@@ -2348,6 +2449,11 @@ def find_user(query: str, limit: int = 20) -> UserList:
     q = (query or "").strip()
     ql = q.lower()
     fields = "id,login,fullName,email"
+
+    if ql == "me":
+        me = _request("GET", "/users/me", params={"fields": fields})
+        items = [_map_user(me)] if isinstance(me, dict) else []
+        return {"items": items, "count": len(items)}
 
     def _filter(users: Any) -> list[dict]:
         out = []
@@ -2359,9 +2465,11 @@ def find_user(query: str, limit: int = 20) -> UserList:
             ).lower()
             if not ql or ql in haystack:
                 out.append(_map_user(u))
-            if len(out) >= limit:
-                break
-        return out
+        # Stable sort: exact login/email first, server order otherwise.
+        out.sort(key=lambda m: ql not in (
+            (m.get("login") or "").lower(), (m.get("email") or "").lower()
+        ))
+        return out[:limit]
 
     # Optimization: YouTrack Cloud accepts an (undocumented) `query` param on
     # /users. Try it, but ALWAYS re-filter client-side: a build that ignores the
@@ -2588,16 +2696,17 @@ def update_article(
 @mcp.tool()
 @_structured
 def search_articles(query: str, limit: int = 20) -> ArticleList:
-    """Search knowledge base articles by title (case-insensitive substring).
+    """Search knowledge base articles with YouTrack search syntax.
 
     YouTrack permissions required: Read Article.
 
-    Note: YouTrack's REST API has no full-text query for articles, so this
-    matches the `query` against article titles. It tries a server-side filter
-    first and falls back to listing titles and matching client-side.
+    The query runs server-side as a full-text search over titles and content,
+    and accepts filters such as `project: IS`. An empty query lists articles.
+    If YouTrack rejects the query, this falls back to matching it against
+    article titles (case-insensitive substring).
 
     Args:
-        query: Text to match against article titles.
+        query: Words to find, and/or YouTrack article search filters.
         limit: Max articles to return.
 
     Returns: {items: [{id, summary, project}], count}.
@@ -2606,32 +2715,35 @@ def search_articles(query: str, limit: int = 20) -> ArticleList:
     ql = q.lower()
     fields = "idReadable,summary,project(name)"
 
-    def _filter(articles: Any) -> list[dict]:
+    def _map(articles: Any, title_filter: bool) -> list[dict]:
         out = []
         for a in articles if isinstance(articles, list) else []:
             if not isinstance(a, dict):
                 continue
-            if not ql or ql in (a.get("summary") or "").lower():
-                project = a.get("project") or {}
-                out.append({
-                    "id": a.get("idReadable"),
-                    "summary": a.get("summary"),
-                    "project": project.get("name") if isinstance(project, dict) else None,
-                })
+            if title_filter and ql and ql not in (a.get("summary") or "").lower():
+                continue
+            project = a.get("project") or {}
+            out.append({
+                "id": a.get("idReadable"),
+                "summary": a.get("summary"),
+                "project": project.get("name") if isinstance(project, dict) else None,
+            })
             if len(out) >= limit:
                 break
         return out
 
-    # Try a server-side query (undocumented for articles), but always re-filter
-    # client-side so an instance that ignores it can't return non-matching titles.
-    items: list[dict] = []
+    # The server's matches are the answer: re-filtering them by title would drop
+    # every content match and every filter-only query (`project: IS`).
     try:
-        res = _request("GET", "/articles", params={"query": q, "fields": fields, "$top": "200"})
-        items = _filter(res)
-    except YouTrackError:
-        items = []
-    if not items:
-        items = _filter(_request("GET", "/articles", params={"fields": fields, "$top": "500"}))
+        res = _request("GET", "/articles", params={"query": q, "fields": fields, "$top": str(limit)})
+        items = _map(res, title_filter=False)
+    except YouTrackHTTPError as e:
+        if e.status != 400:
+            raise
+        items = _map(
+            _request("GET", "/articles", params={"fields": fields, "$top": "500"}),
+            title_filter=True,
+        )
     return {"items": items, "count": len(items)}
 
 
