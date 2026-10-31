@@ -4,6 +4,23 @@ All notable changes to this project are documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.1] - 2026-10-31
+
+Fixes six bugs found by an audit against JetBrains' built-in YouTrack MCP server (YouTrack 2026.2) and live read-only calls on a YouTrack Cloud instance. Tool names and input signatures are unchanged.
+
+### Fixed
+
+- **`create_draft_issue` always failed with HTTP 404.** It posted to `/api/admin/users/me/drafts`, which YouTrack Cloud 2026.2 no longer serves. It now posts to `/api/users/me/drafts` and falls back to the old path only on a 404, for older Server installs.
+- **`search_articles` dropped most matches.** YouTrack's `query` parameter on `/api/articles` is a full-text search over titles and content (with filters like `project: IS`), but the tool re-filtered its results by title, so a word found only in an article body, or a filter-only query, returned nothing. The server's results are now returned as is; the title-substring match is kept only as a fallback when YouTrack rejects the query (HTTP 400). Other errors (403, 5xx) now surface instead of silently falling back.
+- **`find_user("me")` returned someone else.** `me` was treated as a substring, so it matched any user whose name contains "me". It now returns the token owner (`/api/users/me`). Exact login or email matches are also listed first.
+- **`search_issues` reported the page size as `total`.** It said 20 where 781 issues matched. `total` now counts every match across all pages (from the last page directly, or from YouTrack's count endpoint, `null` if that fails), and the result gains `has_more` and `next_offset`.
+- **Error results went out with `isError: false`.** The `{"error": {...}}` envelope is now sent with `isError: true`, as the MCP spec asks. `structuredContent` is unchanged, and calling a tool function directly from Python still returns the plain dict.
+- **Some errors were wrongly marked retryable.** An unexpected exception inside the server was reported as `YOUTRACK_UNAVAILABLE` with `retryable: true`; it is now `INTERNAL_ERROR`, not retryable. A timeout or reset while waiting for the reply to a POST (create, comment, update) is no longer retryable either, since the write may have been applied and a retry could duplicate it; the message says so. Such failures used to escape the network layer and fall into the catch-all. Connection failures before the request is sent, and GET/DELETE timeouts, stay retryable.
+
+### Added
+
+- 15 tests, including a stdio JSON-RPC test that checks `isError` on the wire. Full suite: 211 tests, all passing under mcp 2.3.0.
+
 ## [0.6.0] - 2026-08-31
 
 Migration to MCP Python SDK 2.x. No change to the tool surface, input signatures, structured-output contract, or wire behavior; existing clients (Claude Code included) reconnect as before.
@@ -163,6 +180,9 @@ First public release.
 - **In-process schema cache** with 10-minute TTL.
 - **Per-project writing conventions** in `.youtrack.yml`: language, summary/description templates with variable interpolation, custom field defaults.
 
+[0.6.1]: https://github.com/morganseznec/youtrack-mcp/releases/tag/v0.6.1
+[0.6.0]: https://github.com/morganseznec/youtrack-mcp/releases/tag/v0.6.0
+[0.5.0]: https://github.com/morganseznec/youtrack-mcp/releases/tag/v0.5.0
 [0.4.1]: https://github.com/morganseznec/youtrack-mcp/releases/tag/v0.4.1
 [0.4.0]: https://github.com/morganseznec/youtrack-mcp/releases/tag/v0.4.0
 [0.3.0]: https://github.com/morganseznec/youtrack-mcp/releases/tag/v0.3.0

@@ -24,7 +24,7 @@ from typing_extensions import TypedDict
 
 
 class ErrorObj(TypedDict, total=False):
-    code: str | None  # NOT_FOUND|PERMISSION_DENIED|VALIDATION_FAILED|RATE_LIMITED|YOUTRACK_UNAVAILABLE
+    code: str | None  # NOT_FOUND|PERMISSION_DENIED|VALIDATION_FAILED|RATE_LIMITED|YOUTRACK_UNAVAILABLE|INTERNAL_ERROR
     message: str | None
     youtrack_status: int | None
     retryable: bool | None
@@ -147,7 +147,9 @@ class SearchItem(TypedDict, total=False):
 
 class SearchResults(TypedDict, total=False):
     results: list[SearchItem] | None
-    total: int | None
+    total: int | None  # every match across all pages; null if YouTrack couldn't count
+    has_more: bool | None
+    next_offset: int | None
     error: ErrorObj | None
 
 

@@ -22,12 +22,13 @@ import jsonschema
 SRC = str(Path(__file__).resolve().parent.parent / "src")
 
 
-def _rpc_roundtrip(timeout=30):
-    """Drive one initialize → tools/list exchange over stdio, return the tools.
+def _rpc_roundtrip(timeout=30, request=None):
+    """Drive initialize → one request over stdio, return that request's result.
 
-    A background reader thread consumes stdout line by line so we can wait for the
-    specific tools/list response (id 2) before shutting the server down. Relying on
-    stdin-EOF to flush would race the in-flight response against cancellation.
+    `request` is {"method", "params"?}; it defaults to tools/list. A background
+    reader thread consumes stdout line by line so we can wait for the specific
+    response (id 2) before shutting the server down. Relying on stdin-EOF to
+    flush would race the in-flight response against cancellation.
     """
     env = {
         **os.environ,
@@ -60,12 +61,12 @@ def _rpc_roundtrip(timeout=30):
          "params": {"protocolVersion": "2024-11-05", "capabilities": {},
                     "clientInfo": {"name": "acceptance", "version": "0"}}},
         {"jsonrpc": "2.0", "method": "notifications/initialized"},
-        {"jsonrpc": "2.0", "id": 2, "method": "tools/list"},
+        {"jsonrpc": "2.0", "id": 2, **(request or {"method": "tools/list"})},
     ]
     proc.stdin.write("".join(json.dumps(m) + "\n" for m in messages))
     proc.stdin.flush()
 
-    tools = None
+    result = None
     deadline = time.monotonic() + timeout
     try:
         while time.monotonic() < deadline:
@@ -80,7 +81,7 @@ def _rpc_roundtrip(timeout=30):
             except json.JSONDecodeError:
                 continue
             if msg.get("id") == 2 and "result" in msg:
-                tools = msg["result"]["tools"]
+                result = msg["result"]
                 break
     finally:
         try:
@@ -93,12 +94,12 @@ def _rpc_roundtrip(timeout=30):
         except subprocess.TimeoutExpired:
             proc.kill()
 
-    assert tools is not None, "no tools/list response received over stdio"
-    return tools
+    assert result is not None, "no response to request id 2 received over stdio"
+    return result
 
 
 def test_stdio_tools_list_declares_valid_output_schemas():
-    tools = _rpc_roundtrip()
+    tools = _rpc_roundtrip()["tools"]
     assert len(tools) >= 25, f"expected the full tool surface, got {len(tools)}"
 
     for tool in tools:
@@ -111,7 +112,19 @@ def test_stdio_tools_list_declares_valid_output_schemas():
 
 
 def test_stdio_core_tools_present():
-    names = {t["name"] for t in _rpc_roundtrip()}
+    names = {t["name"] for t in _rpc_roundtrip()["tools"]}
     for required in ("get_issue", "update_issue", "download_attachment",
                      "create_issue", "add_comment", "search_issues"):
         assert required in names, f"{required} missing from the stdio tool list"
+
+
+def test_stdio_error_envelope_is_flagged_is_error():
+    # test.invalid never resolves, so the call fails at the network layer. On
+    # the wire the envelope must carry isError: true (MCP spec), alongside the
+    # structuredContent an orchestrator routes on.
+    result = _rpc_roundtrip(request={
+        "method": "tools/call",
+        "params": {"name": "get_issue", "arguments": {"issue_id": "PROJ-1"}},
+    })
+    assert result["isError"] is True
+    assert result["structuredContent"]["error"]["code"] == "YOUTRACK_UNAVAILABLE"
