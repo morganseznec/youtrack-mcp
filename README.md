@@ -1,5 +1,7 @@
 # YouTrack MCP
 
+[![M8ven Score](https://m8ven.ai/badge/mcp/morganseznec/youtrack-mcp)](https://m8ven.ai/mcp/morganseznec/youtrack-mcp?s=readme)
+
 [Model Context Protocol](https://modelcontextprotocol.io/) server for [YouTrack](https://www.jetbrains.com/youtrack/). Lets Claude Code (and any other MCP client) manage YouTrack issues, articles, time tracking, and more directly from your conversations.
 
 ## Features
